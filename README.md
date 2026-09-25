@@ -9,8 +9,7 @@ publication-ready figure — all locally, with no server and no data leaving you
 
 ![TreeWeaver example MST](docs/MST_example.png)
 
-*Example: 47 isolates — a 12-sample outbreak core with many offshoots
-(see [`examples/example_matrix.tsv`](examples/example_matrix.tsv)).*
+*Example: a real Legionella outbreak dataset (412 genomes) rendered with TreeWeaver.*
 
 ---
 
@@ -209,6 +208,35 @@ Merges components by repeatedly taking each component's cheapest outgoing edge.
   `O(log n)` because each round at least halves the number of components.
 - **When it shines:** it is naturally parallel/distributed (each component can search
   independently), and it is the basis of several fast parallel MST algorithms.
+
+### Tie-breaking
+
+When several edges share the same weight, the three algorithms may pick different ones,
+so the **tree shape can differ even though the total weight is identical**. This is very
+common with SNP data, where many distances are 0 or 1.
+
+- **Prim** — scans nodes in index order and keeps the first minimum found, so ties are
+  resolved by the **lowest node index**.
+- **Kruskal** — sorts edges by weight with a **stable** sort, so among equal-weight edges
+  the one appearing first in the edge list (row-major order of the matrix) is considered
+  first; the first one that joins two different components is kept.
+- **Boruvka** — for each component, scans candidate edges in index order and keeps the
+  first strictly-cheaper edge, so ties go to the **lowest-index neighbour**.
+
+### Collapsing and transitivity
+
+The **Collapse** control merges samples whose distance is **≤ the threshold**, but it does
+so on the **connected components** of that relation — it does **not** require every pair in
+a group to be within the threshold. Merging is therefore **transitive**:
+
+> If `a–b = 0`, `b–c = 0`, and `c–a = 1`, then at threshold 0 the edges `a–b` and `b–c` are
+> both ≤ 0, so `a`, `b`, and `c` all end up in the **same node** — even though `c–a = 1` is
+> above the threshold.
+
+This is implemented with a union-find: every pair with distance ≤ threshold is unioned, and
+the resulting connected components become the nodes. A chain of near-identical samples
+therefore collapses into a single node whose size is the number of samples in that component;
+the `c–a = 1` edge is simply ignored because `a` and `c` are already connected through `b`.
 
 ### Which should I use?
 
