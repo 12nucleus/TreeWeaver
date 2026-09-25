@@ -9,7 +9,7 @@ publication-ready figure — all locally, with no server and no data leaving you
 
 ![TreeWeaver example MST](docs/MST_example.png)
 
-*Example: a real Legionella outbreak dataset (412 genomes) rendered with TreeWeaver.*
+*Example: a real outbreak dataset (412 genomes) rendered with TreeWeaver.*
 
 ---
 
