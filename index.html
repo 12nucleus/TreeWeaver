@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minimum spanning tree (SNP distances)</title>
+<style>
+  html, body { margin: 0; height: 100%; font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  #graph { width: 100vw; height: 100vh; display: block; background: #ffffff; cursor: grab; touch-action: none; }
+  #toolbar { position: fixed; top: 10px; left: 10px; right: 10px; z-index: 10; display: flex;
+             flex-wrap: wrap; gap: 8px; align-items: center; }
+  #toolbar button { font-size: 13px; padding: 5px 10px; border: 1px solid #bbb; border-radius: 5px;
+                    background: #f7f7f7; cursor: pointer; }
+  #toolbar button:hover { background: #eaeaea; }
+  #toolbar button.active { background: #d7e8ff; border-color: #7aa7e0; }
+  #toolbar label { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px;
+                   background: rgba(255,255,255,0.92); padding: 3px 8px; border-radius: 5px;
+                   border: 1px solid #ddd; }
+  #toolbar input[type=range] { width: 110px; }
+  #toolbar .val { font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; color: #555; }
+  #toolbar select { font-size: 12px; padding: 3px 4px; border: 1px solid #ccc; border-radius: 4px;
+                    background: #fff; color: #333; }
+  #hint { position: fixed; bottom: 10px; left: 10px; z-index: 10; font-size: 12px; color: #666; }
+  #tooltip { position: fixed; display: none; z-index: 20; pointer-events: auto;
+             background: rgba(255,255,255,0.97); border: 1px solid #999; border-radius: 5px;
+             padding: 6px 9px; font-size: 12px; max-width: 360px; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
+  #tooltip button { font-size: 11px; margin: 5px 4px 0 0; padding: 3px 7px; border: 1px solid #bbb;
+                    border-radius: 4px; background: #f7f7f7; cursor: pointer; }
+  #tooltip button:hover { background: #eaeaea; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <label>Matrix <input type="file" id="matrixFile" accept=".tsv,.txt,.csv,.tab"></label>
+  <button id="play">&#9654; Play</button>
+  <button id="reset">Reset</button>
+  <label>Export <select id="exportFormat"><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
+  <button id="export">Download</button>
+  <button id="zin">Zoom +</button>
+  <button id="zout">Zoom &minus;</button>
+  <button id="fit">Fit</button>
+  <label>MST <select id="mstAlgo"><option value="prim">Prim</option><option value="kruskal">Kruskal</option><option value="boruvka">Boruvka</option></select></label>
+  <label>Collapse <select id="collapse"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="8">8</option><option value="10">10</option></select></label>
+  <label>Layout <select id="layoutMode"><option value="spring">Spring</option><option value="snp">SNP-weighted repulsion</option><option value="stress">Stress (MDS)</option><option value="stiff">Stiff springs</option></select></label>
+  <label>Repulsion <input type="range" id="repulsion" min="0.1" max="10" step="0.1" value="10"><span class="val" id="repulsionVal">10.0</span></label>
+  <label>Attraction <input type="range" id="attraction" min="0.1" max="10" step="0.1" value="0.1"><span class="val" id="attractionVal">0.1</span></label>
+  <label>Speed <input type="range" id="speed" min="1" max="20" step="1" value="10"><span class="val" id="speedVal">10</span></label>
+  <label>Label size <input type="range" id="labelScale" min="0.3" max="3" step="0.1" value="1"><span class="val" id="labelScaleVal">1.0</span></label>
+  <label>Edge font <input type="range" id="edgeFont" min="4" max="24" step="1" value="11"><span class="val" id="edgeFontVal">11</span></label>
+  <label>Edge width <input type="range" id="edgeWidth" min="0.5" max="6" step="0.1" value="1.2"><span class="val" id="edgeWidthVal">1.2</span></label>
+</div>
+<div id="hint">Press Play to relax the layout &middot; tune Repulsion/Attraction &middot; drag a node to pin it &middot; drag the background to pan &middot; scroll to zoom &middot; hover for details</div>
+<svg id="graph"></svg>
+<div id="tooltip"></div>
+<script>
+const DATA = {"nodes": [], "edges": [], "collapse": 0.0, "mstAlgo": "prim", "layoutMode": "spring", "prefix": "index"};
+const NS = "http://www.w3.org/2000/svg";
+const W = 1000, H = 1000;
+const svg = document.getElementById("graph");
+svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+const gRoot = document.createElementNS(NS, "g");
+svg.appendChild(gRoot);
+const edgeLayer = document.createElementNS(NS, "g");
+const nodeLayer = document.createElementNS(NS, "g");
+gRoot.appendChild(edgeLayer);
+gRoot.appendChild(nodeLayer);
+
+// ---- embedded data (optional; can be replaced by an uploaded matrix) ----
+let N = DATA.n || 0;
+let PREFIX = DATA.prefix || "mst";
+let LABELS = DATA.labels || [];
+let MATRIX = DATA.matrix || [];
+function snp(i, j) { return MATRIX[i * N + j]; }
+
+const state = {
+  collapse: DATA.collapse,
+  mstAlgo: DATA.mstAlgo,
+  layoutMode: DATA.layoutMode,
+  repulsion: 10.0,
+  attraction: 0.1,
+  speed: 10,
+  bounded: false,
+  labelScale: 1.0,
+  edgeFont: 11,
+  edgeWidth: 1.2,
+};
+
+let nodes = [];
+let edges = [];
+let byId = {};
+let initial = [];
+let nodeObjs = [];
+let edgeObjs = [];
+
+// ---- MST algorithms ----
+function mstPrim() {
+  const inTree = new Uint8Array(N);
+  const best = new Float64Array(N).fill(Infinity);
+  const parent = new Int32Array(N).fill(-1);
+  best[0] = 0;
+  const out = [];
+  for (let it = 0; it < N; it++) {
+    let u = -1, bv = Infinity;
+    for (let i = 0; i < N; i++) if (!inTree[i] && best[i] < bv) { bv = best[i]; u = i; }
+    if (u === -1) break;
+    inTree[u] = 1;
+    if (parent[u] !== -1) out.push({ s: parent[u], t: u, w: snp(parent[u], u) });
+    for (let v = 0; v < N; v++) {
+      if (!inTree[v]) { const w = snp(u, v); if (w < best[v]) { best[v] = w; parent[v] = u; } }
+    }
+  }
+  return out;
+}
+
+function mstKruskal() {
+  const all = [];
+  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) all.push([snp(i, j), i, j]);
+  all.sort((a, b) => a[0] - b[0]);
+  const parent = new Int32Array(N);
+  for (let i = 0; i < N; i++) parent[i] = i;
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  const out = [];
+  for (const [w, i, j] of all) {
+    const ri = find(i), rj = find(j);
+    if (ri !== rj) { parent[ri] = rj; out.push({ s: i, t: j, w }); if (out.length === N - 1) break; }
+  }
+  return out;
+}
+
+function mstBoruvka() {
+  const parent = new Int32Array(N);
+  for (let i = 0; i < N; i++) parent[i] = i;
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  const out = [];
+  let components = N;
+  while (components > 1) {
+    const cheapestFrom = new Int32Array(N).fill(-1);
+    const cheapestTo = new Int32Array(N).fill(-1);
+    const cheapestW = new Float64Array(N).fill(Infinity);
+    for (let i = 0; i < N; i++) {
+      const ri = find(i);
+      for (let j = 0; j < N; j++) {
+        if (i === j || find(j) === ri) continue;
+        const w = snp(i, j);
+        if (w < cheapestW[ri]) { cheapestW[ri] = w; cheapestFrom[ri] = i; cheapestTo[ri] = j; }
+      }
+    }
+    let merged = 0;
+    for (let r = 0; r < N; r++) {
+      if (cheapestFrom[r] !== -1) {
+        const i = cheapestFrom[r], j = cheapestTo[r];
+        const ri = find(i), rj = find(j);
+        if (ri !== rj) {
+          parent[ri] = rj;
+          out.push({ s: i, t: j, w: snp(i, j) });
+          merged++; components--;
+        }
+      }
+    }
+    if (merged === 0) break;
+  }
+  return out;
+}
+
+function computeMST() {
+  if (state.mstAlgo === "kruskal") return mstKruskal();
+  if (state.mstAlgo === "boruvka") return mstBoruvka();
+  return mstPrim();
+}
+
+// ---- collapse ----
+function computeComponents(threshold) {
+  const parent = new Int32Array(N);
+  for (let i = 0; i < N; i++) parent[i] = i;
+  function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      if (snp(i, j) <= threshold) { const ri = find(i), rj = find(j); if (ri !== rj) parent[ri] = rj; }
+    }
+  }
+  const compId = new Int32Array(N);
+  const index = new Map();
+  const members = [];
+  for (let i = 0; i < N; i++) {
+    const r = find(i);
+    if (!index.has(r)) { index.set(r, members.length); members.push([]); }
+    const c = index.get(r);
+    compId[i] = c;
+    members[c].push(i);
+  }
+  return { compId, members };
+}
+
+function collapseEdges(mst, compId) {
+  const seen = new Map();
+  for (const e of mst) {
+    const a = compId[e.s], b = compId[e.t];
+    if (a === b) continue;
+    const key = a < b ? a + "," + b : b + "," + a;
+    const cur = seen.get(key);
+    if (!cur || e.w < cur.w) seen.set(key, { s: Math.min(a, b), t: Math.max(a, b), w: e.w });
+  }
+  return [...seen.values()];
+}
+
+// ---- colors ----
+function hsvToHex(h, s, v) {
+  const c = v * s, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = v - c;
+  const hh = Math.floor(h * 6) % 6;
+  let r, g, b;
+  if (hh === 0) { r = c; g = x; b = 0; }
+  else if (hh === 1) { r = x; g = c; b = 0; }
+  else if (hh === 2) { r = 0; g = c; b = x; }
+  else if (hh === 3) { r = 0; g = x; b = c; }
+  else if (hh === 4) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  const to = (val) => Math.round((val + m) * 255).toString(16).padStart(2, "0");
+  return "#" + to(r) + to(g) + to(b);
+}
+function distinctColors(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const hue = (i * 0.618033988749895) % 1;
+    const sat = 0.55 + 0.25 * ((i % 3) / 2);
+    const val = 0.85 - 0.15 * (i % 2);
+    out.push(hsvToHex(hue, sat, val));
+  }
+  return out;
+}
+
+// ---- layout ----
+function layoutSpring(iterations, attractionMul) {
+  const n = nodes.length;
+  if (n < 2) return;
+  const ideal = 700 / Math.sqrt(n);
+  const repulsion = ideal * ideal * state.repulsion;
+  const attraction = state.attraction * (attractionMul || 1);
+  const rest = edges.map(e => ideal * (1 + 0.5 * Math.log1p(e.w)));
+  let temp = 70;
+  const cooling = 0.995;
+  for (let it = 0; it < iterations; it++) {
+    const dx = new Float64Array(n), dy = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const ddx = nodes[i].x - nodes[j].x, ddy = nodes[i].y - nodes[j].y;
+        const d = Math.hypot(ddx, ddy) || 1e-4;
+        const f = repulsion / (d * d);
+        const ux = ddx / d, uy = ddy / d;
+        dx[i] += f * ux; dy[i] += f * uy; dx[j] -= f * ux; dy[j] -= f * uy;
+      }
+    }
+    edges.forEach((e, idx) => {
+      const a = nodes[e.s], b = nodes[e.t];
+      const ddx = a.x - b.x, ddy = a.y - b.y;
+      const d = Math.hypot(ddx, ddy) || 1e-4;
+      const f = attraction * (d - rest[idx]);
+      const ux = ddx / d, uy = ddy / d;
+      dx[a.id] -= f * ux; dy[a.id] -= f * uy; dx[b.id] += f * ux; dy[b.id] += f * uy;
+    });
+    for (let i = 0; i < n; i++) {
+      const m = Math.hypot(dx[i], dy[i]) || 1e-9;
+      const step = Math.min(m, temp);
+      nodes[i].x += dx[i] / m * step; nodes[i].y += dy[i] / m * step;
+    }
+    temp *= cooling;
+  }
+}
+
+function layoutSnp(iterations) {
+  const n = nodes.length;
+  if (n < 2) return;
+  const ideal = 700 / Math.sqrt(n);
+  const repulsion = ideal * ideal * state.repulsion;
+  const attraction = state.attraction;
+  const rest = edges.map(e => ideal * (1 + 0.5 * Math.log1p(e.w)));
+  const cd = [];
+  let sum = 0, cnt = 0;
+  for (let a = 0; a < n; a++) {
+    cd.push(new Float64Array(n));
+    for (let b = 0; b < n; b++) {
+      if (a === b) continue;
+      let best = Infinity;
+      for (const i of nodes[a].membersIdx) for (const j of nodes[b].membersIdx) { const w = snp(i, j); if (w < best) best = w; }
+      cd[a][b] = best;
+      if (best > 0) { sum += best; cnt++; }
+    }
+  }
+  const mean = cnt ? sum / cnt : 1;
+  let temp = 70;
+  const cooling = 0.995;
+  for (let it = 0; it < iterations; it++) {
+    const dx = new Float64Array(n), dy = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const ddx = nodes[i].x - nodes[j].x, ddy = nodes[i].y - nodes[j].y;
+        const d = Math.hypot(ddx, ddy) || 1e-4;
+        const f = repulsion / (d * d) * (1 + cd[i][j] / mean);
+        const ux = ddx / d, uy = ddy / d;
+        dx[i] += f * ux; dy[i] += f * uy; dx[j] -= f * ux; dy[j] -= f * uy;
+      }
+    }
+    edges.forEach((e, idx) => {
+      const a = nodes[e.s], b = nodes[e.t];
+      const ddx = a.x - b.x, ddy = a.y - b.y;
+      const d = Math.hypot(ddx, ddy) || 1e-4;
+      const f = attraction * (d - rest[idx]);
+      const ux = ddx / d, uy = ddy / d;
+      dx[a.id] -= f * ux; dy[a.id] -= f * uy; dx[b.id] += f * ux; dy[b.id] += f * uy;
+    });
+    for (let i = 0; i < n; i++) {
+      const m = Math.hypot(dx[i], dy[i]) || 1e-9;
+      const step = Math.min(m, temp);
+      nodes[i].x += dx[i] / m * step; nodes[i].y += dy[i] / m * step;
+    }
+    temp *= cooling;
+  }
+}
+
+function layoutStress(iterations) {
+  const n = nodes.length;
+  if (n < 2) return;
+  const adj = Array.from({ length: n }, () => []);
+  for (const e of edges) {
+    const lw = Math.log1p(e.w) + 0.5;
+    adj[e.s].push([e.t, lw]); adj[e.t].push([e.s, lw]);
+  }
+  const D = [];
+  for (let s = 0; s < n; s++) {
+    const dist = new Float64Array(n).fill(Infinity); dist[s] = 0;
+    const done = new Uint8Array(n);
+    for (let it = 0; it < n; it++) {
+      let u = -1, bv = Infinity;
+      for (let i = 0; i < n; i++) if (!done[i] && dist[i] < bv) { bv = dist[i]; u = i; }
+      if (u === -1) break;
+      done[u] = 1;
+      for (const [v, w] of adj[u]) if (dist[u] + w < dist[v]) dist[v] = dist[u] + w;
+    }
+    D.push(dist);
+  }
+  const K = [];
+  for (let i = 0; i < n; i++) {
+    K.push(new Float64Array(n));
+    for (let j = 0; j < n; j++) K[i][j] = (i !== j && D[i][j] > 0) ? 1 / (D[i][j] * D[i][j]) : 0;
+  }
+  const L = 1.0;
+  for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; nodes[i].x = Math.cos(a); nodes[i].y = Math.sin(a); }
+  for (let it = 0; it < iterations; it++) {
+    let maxDelta = 0;
+    for (let i = 0; i < n; i++) {
+      let numx = 0, numy = 0, den = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const ddx = nodes[i].x - nodes[j].x, ddy = nodes[i].y - nodes[j].y;
+        const d = Math.hypot(ddx, ddy) || 1e-9;
+        const kij = K[i][j];
+        numx += kij * (nodes[j].x + L * D[i][j] * ddx / d);
+        numy += kij * (nodes[j].y + L * D[i][j] * ddy / d);
+        den += kij;
+      }
+      if (den > 0) {
+        const nx = numx / den, ny = numy / den;
+        maxDelta = Math.max(maxDelta, Math.hypot(nx - nodes[i].x, ny - nodes[i].y));
+        nodes[i].x = nx; nodes[i].y = ny;
+      }
+    }
+    if (maxDelta < 1e-4) break;
+  }
+}
+
+function layoutInitial() {
+  nodes.forEach(n => { n.x = Math.random() * 1000; n.y = Math.random() * 1000; });
+  if (state.layoutMode === "stress") layoutStress(300);
+  else if (state.layoutMode === "snp") layoutSnp(600);
+  else if (state.layoutMode === "stiff") layoutSpring(600, 3.0);
+  else layoutSpring(600, 1.0);
+}
+
+function normalize() {
+  const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.max(maxX - minX, maxY - minY) || 1;
+  const pad = 60;
+  const s = (W - 2 * pad) / span;
+  nodes.forEach(n => { n.x = pad + (n.x - minX) * s; n.y = pad + (n.y - minY) * s; });
+}
+
+// ---- build graph ----
+function buildGraph() {
+  const mst = computeMST();
+  const { compId, members } = computeComponents(state.collapse);
+  const cedges = collapseEdges(mst, compId);
+  const colors = distinctColors(members.length);
+  const counts = members.map(m => m.length);
+  const maxCount = Math.max(...counts);
+  const rScale = 1000 * 0.07 / (0.6 + Math.sqrt(maxCount));
+  nodes = members.map((mem, c) => {
+    const count = mem.length;
+    const names = mem.map(i => LABELS[i]).sort();
+    const label = count === 1 ? names[0] : names[0] + " (+" + (count - 1) + ")";
+    const membersStr = names.slice(0, 8).join(", ") + (count > 8 ? " ..." : "");
+    return {
+      id: c, count, label, members: membersStr, membersIdx: mem,
+      color: colors[c], r: rScale * (0.6 + Math.sqrt(count)),
+      x: 0, y: 0, pinned: false,
+    };
+  });
+  edges = cedges.map(e => ({ s: e.s, t: e.t, w: e.w }));
+  byId = {};
+  nodes.forEach(n => { byId[n.id] = n; });
+  layoutInitial();
+  normalize();
+  initial = nodes.map(n => ({ x: n.x, y: n.y }));
+  render();
+}
+
+// ---- render ----
+function render() {
+  while (edgeLayer.firstChild) edgeLayer.removeChild(edgeLayer.firstChild);
+  while (nodeLayer.firstChild) nodeLayer.removeChild(nodeLayer.firstChild);
+  edgeObjs = [];
+  nodeObjs = [];
+  for (const e of edges) {
+    const line = document.createElementNS(NS, "line");
+    line.setAttribute("stroke", "#7a7a7a");
+    line.setAttribute("stroke-width", state.edgeWidth);
+    edgeLayer.appendChild(line);
+    const label = document.createElementNS(NS, "text");
+    label.setAttribute("font-size", state.edgeFont);
+    label.setAttribute("fill", "#333333");
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("dominant-baseline", "middle");
+    label.textContent = e.w;
+    edgeLayer.appendChild(label);
+    edgeObjs.push({ e, line, label });
+  }
+  for (const n of nodes) {
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("r", n.r);
+    c.setAttribute("fill", n.color);
+    c.setAttribute("stroke", "black");
+    c.setAttribute("stroke-width", "0.8");
+    c.style.cursor = "grab";
+    nodeLayer.appendChild(c);
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("text-anchor", "middle");
+    t.setAttribute("dominant-baseline", "middle");
+    t.setAttribute("font-size", Math.max(8, Math.min(15, n.r * 0.55)) * state.labelScale);
+    t.setAttribute("pointer-events", "none");
+    t.textContent = n.label;
+    nodeLayer.appendChild(t);
+    const o = { n, c, t };
+    nodeObjs.push(o);
+    c.addEventListener("pointerdown", ev => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      drag = o;
+      o.n.pinned = true;
+      const p = clientToGraph(ev);
+      dragOffset = { x: o.n.x - p.x, y: o.n.y - p.y };
+      c.setPointerCapture(ev.pointerId);
+      c.style.cursor = "grabbing";
+    });
+    c.addEventListener("mouseenter", ev => {
+      clearTimeout(hideTimer);
+      hoverNode = o;
+      tip.innerHTML = `<b>${o.n.label}</b><br>samples: ${o.n.count}<br>${o.n.members}` +
+        `<div><button data-act="samples">Download samples</button>` +
+        `<button data-act="matrix">Download matrix</button></div>`;
+      tip.style.display = "block";
+      positionTip(ev);
+    });
+    c.addEventListener("mousemove", ev => { if (hoverNode === o) positionTip(ev); });
+    c.addEventListener("mouseleave", () => {
+      hideTimer = setTimeout(() => { tip.style.display = "none"; }, 350);
+    });
+  }
+  redraw();
+}
+
+function redraw() {
+  edgeObjs.forEach(o => {
+    const a = byId[o.e.s], b = byId[o.e.t];
+    o.line.setAttribute("x1", a.x); o.line.setAttribute("y1", a.y);
+    o.line.setAttribute("x2", b.x); o.line.setAttribute("y2", b.y);
+    o.label.setAttribute("x", (a.x + b.x) / 2);
+    o.label.setAttribute("y", (a.y + b.y) / 2);
+  });
+  nodeObjs.forEach(o => {
+    o.c.setAttribute("cx", o.n.x); o.c.setAttribute("cy", o.n.y);
+    o.t.setAttribute("x", o.n.x); o.t.setAttribute("y", o.n.y);
+  });
+}
+
+// Apply the font-size / edge-width controls without rebuilding the graph.
+function applyStyle() {
+  edgeObjs.forEach(o => {
+    o.line.setAttribute("stroke-width", state.edgeWidth);
+    o.label.setAttribute("font-size", state.edgeFont);
+  });
+  nodeObjs.forEach(o => {
+    o.t.setAttribute("font-size", Math.max(8, Math.min(15, o.n.r * 0.55)) * state.labelScale);
+  });
+}
+
+let k = 1, tx = 0, ty = 0;
+let drag = null, dragOffset = { x: 0, y: 0 };
+let panning = false, panStart = { x: 0, y: 0 };
+
+function applyTransform() {
+  gRoot.setAttribute("transform", `translate(${tx},${ty}) scale(${k})`);
+}
+
+// Convert a client (screen) point into the graph's local coordinate space,
+// correctly accounting for the pan/zoom transform and the viewBox scaling.
+function clientToGraph(ev) {
+  const pt = svg.createSVGPoint();
+  pt.x = ev.clientX;
+  pt.y = ev.clientY;
+  const local = pt.matrixTransform(gRoot.getScreenCTM().inverse());
+  return { x: local.x, y: local.y };
+}
+
+// Convert a client point into the untransformed viewBox space (for zooming).
+function clientToViewBox(ev) {
+  const pt = svg.createSVGPoint();
+  pt.x = ev.clientX;
+  pt.y = ev.clientY;
+  const local = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return { x: local.x, y: local.y };
+}
+
+svg.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const p = clientToViewBox(ev);
+  const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const nk = Math.max(0.2, Math.min(25, k * factor));
+  tx = p.x - (p.x - tx) * (nk / k);
+  ty = p.y - (p.y - ty) * (nk / k);
+  k = nk;
+  applyTransform();
+}, { passive: false });
+
+svg.addEventListener("pointerdown", ev => {
+  panning = true;
+  panStart = { x: ev.clientX, y: ev.clientY };
+});
+
+window.addEventListener("pointermove", ev => {
+  if (drag) {
+    const p = clientToGraph(ev);
+    drag.n.x = p.x + dragOffset.x;
+    drag.n.y = p.y + dragOffset.y;
+    redraw();
+  } else if (panning) {
+    const rect = svg.getBoundingClientRect();
+    tx += (ev.clientX - panStart.x) / rect.width * W;
+    ty += (ev.clientY - panStart.y) / rect.height * H;
+    panStart = { x: ev.clientX, y: ev.clientY };
+    applyTransform();
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  if (drag) { drag.n.pinned = false; drag.c.style.cursor = "grab"; drag = null; }
+  panning = false;
+});
+
+const tip = document.getElementById("tooltip");
+let hoverNode = null;
+let hideTimer = null;
+
+function positionTip(ev) {
+  tip.style.left = (ev.clientX + 14) + "px";
+  tip.style.top = (ev.clientY + 14) + "px";
+}
+function safeName(s) {
+  return s.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60);
+}
+function downloadSamples(o) {
+  const names = o.n.membersIdx.map(i => LABELS[i]);
+  downloadBlob(new Blob([names.join("\n") + "\n"], { type: "text/plain" }),
+    PREFIX + "_" + safeName(o.n.label) + "_samples.txt");
+}
+function downloadMatrix(o) {
+  const idx = o.n.membersIdx;
+  const lines = ["	" + idx.map(i => LABELS[i]).join("	")];
+  for (const i of idx) lines.push(LABELS[i] + "	" + idx.map(j => snp(i, j)).join("	"));
+  downloadBlob(new Blob([lines.join("\n") + "\n"], { type: "text/tab-separated-values" }),
+    PREFIX + "_" + safeName(o.n.label) + "_matrix.tsv");
+}
+tip.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+tip.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+tip.addEventListener("click", ev => {
+  const act = ev.target && ev.target.dataset ? ev.target.dataset.act : null;
+  if (!act || !hoverNode) return;
+  if (act === "samples") downloadSamples(hoverNode);
+  else if (act === "matrix") downloadMatrix(hoverNode);
+});
+
+// ---- live simulation ----
+let playing = false;
+let snpMean = 1;
+
+function snpDist(a, b) {
+  let best = Infinity;
+  for (const i of nodes[a].membersIdx) for (const j of nodes[b].membersIdx) { const w = snp(i, j); if (w < best) best = w; }
+  return best;
+}
+function computeSnpMean() {
+  let sum = 0, cnt = 0;
+  for (let a = 0; a < nodes.length; a++) for (let b = a + 1; b < nodes.length; b++) {
+    const w = snpDist(a, b);
+    if (w > 0) { sum += w; cnt++; }
+  }
+  snpMean = cnt ? sum / cnt : 1;
+}
+
+function layoutStep(temp) {
+  if (state.layoutMode === "stress") { layoutStress(1); return; }
+  const n = nodes.length;
+  if (n < 2) return;
+  const ideal = 700 / Math.sqrt(n);
+  const repulsion = ideal * ideal * state.repulsion;
+  const attraction = state.attraction * (state.layoutMode === "stiff" ? 3.0 : 1.0);
+  const useSnp = state.layoutMode === "snp";
+  const dx = new Float64Array(n);
+  const dy = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let ddx = nodes[i].x - nodes[j].x;
+      let ddy = nodes[i].y - nodes[j].y;
+      let d = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (d < 1e-4) {
+        ddx = Math.random() - 0.5;
+        ddy = Math.random() - 0.5;
+        d = Math.hypot(ddx, ddy) || 1e-4;
+      }
+      let f = repulsion / (d * d);
+      if (useSnp) f *= (1 + snpDist(i, j) / snpMean);
+      const ux = ddx / d, uy = ddy / d;
+      dx[i] += f * ux; dy[i] += f * uy;
+      dx[j] -= f * ux; dy[j] -= f * uy;
+    }
+  }
+  for (const e of edges) {
+    const a = nodes[e.s], b = nodes[e.t];
+    const ddx = a.x - b.x, ddy = a.y - b.y;
+    const d = Math.sqrt(ddx * ddx + ddy * ddy) || 1e-4;
+    const rest = ideal * (1 + 0.5 * Math.log1p(e.w));
+    const f = attraction * (d - rest);
+    const ux = ddx / d, uy = ddy / d;
+    dx[a.id] -= f * ux; dy[a.id] -= f * uy;
+    dx[b.id] += f * ux; dy[b.id] += f * uy;
+  }
+  if (state.bounded) {
+    const margin = 40;
+    for (let i = 0; i < n; i++) {
+      const nd = nodes[i];
+      if (nd.x < margin) dx[i] += (margin - nd.x);
+      if (nd.x > W - margin) dx[i] -= (nd.x - (W - margin));
+      if (nd.y < margin) dy[i] += (margin - nd.y);
+      if (nd.y > H - margin) dy[i] -= (nd.y - (H - margin));
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    if (nodes[i].pinned) continue;
+    const m = Math.hypot(dx[i], dy[i]);
+    if (m < 1e-9) continue;
+    const step = Math.min(m, temp);
+    nodes[i].x += dx[i] / m * step;
+    nodes[i].y += dy[i] / m * step;
+  }
+}
+
+function loop() {
+  if (!playing) return;
+  for (let s = 0; s < state.speed; s++) layoutStep(5);
+  redraw();
+  requestAnimationFrame(loop);
+}
+
+const playButton = document.getElementById("play");
+playButton.onclick = () => {
+  playing = !playing;
+  playButton.textContent = playing ? "⏸ Pause" : "▶ Play";
+  playButton.classList.toggle("active", playing);
+  if (playing) requestAnimationFrame(loop);
+};
+
+function startPlay() {
+  if (playing) return;
+  playing = true;
+  playButton.textContent = "⏸ Pause";
+  playButton.classList.add("active");
+  requestAnimationFrame(loop);
+}
+
+document.getElementById("reset").onclick = () => {
+  playing = false;
+  playButton.textContent = "▶ Play";
+  playButton.classList.remove("active");
+  nodes.forEach((n, i) => { n.x = initial[i].x; n.y = initial[i].y; });
+  redraw();
+};
+
+// ---- export (SVG / PNG / PDF) ----
+function downloadBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+}
+
+// Size of the on-screen canvas, so exports match the current view.
+function viewSize() {
+  const rect = svg.getBoundingClientRect();
+  return { w: Math.max(1, Math.round(rect.width || W)), h: Math.max(1, Math.round(rect.height || H)) };
+}
+
+// Clone the live SVG (which carries the current pan/zoom transform) at the
+// on-screen size, so the export captures exactly what is displayed.
+function cloneView() {
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", NS);
+  const size = viewSize();
+  clone.setAttribute("width", size.w);
+  clone.setAttribute("height", size.h);
+  return clone;
+}
+
+function exportSVG() {
+  downloadBlob(new Blob([cloneView().outerHTML], { type: "image/svg+xml" }), PREFIX + ".svg");
+}
+
+function exportPNG() {
+  const size = viewSize();
+  const data = new XMLSerializer().serializeToString(cloneView());
+  const url = URL.createObjectURL(new Blob([data], { type: "image/svg+xml;charset=utf-8" }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = size.w * scale;
+    canvas.height = size.h * scale;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob((blob) => downloadBlob(blob, PREFIX + ".png"));
+  };
+  img.src = url;
+}
+
+function exportPDF() {
+  // Match the on-screen SVG exactly: same aspect ratio and viewBox mapping.
+  const size = viewSize();
+  const pageW = size.w * 2, pageH = size.h * 2;
+  const s = Math.min(pageW / W, pageH / H);
+  const offX = (pageW - W * s) / 2;
+  const offY = (pageH - H * s) / 2;
+  const ops = [];
+  const rgb = (hex) => {
+    const h = hex.replace("#", "");
+    return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255];
+  };
+  const setFill = (c) => ops.push(`${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)} rg`);
+  const setStroke = (c) => ops.push(`${c[0].toFixed(4)} ${c[1].toFixed(4)} ${c[2].toFixed(4)} RG`);
+  const px = (x) => offX + (tx + k * x) * s;
+  const py = (y) => pageH - (offY + (ty + k * y) * s);
+  const BS = String.fromCharCode(92);
+  const esc = (s) => s.split(BS).join(BS + BS).split("(").join(BS + "(").split(")").join(BS + ")");
+  for (const e of edges) {
+    const a = byId[e.s], b = byId[e.t];
+    const x1 = px(a.x), y1 = py(a.y), x2 = px(b.x), y2 = py(b.y);
+    setStroke([0.48, 0.48, 0.48]);
+    ops.push(`${state.edgeWidth.toFixed(3)} w`);
+    ops.push(`${x1.toFixed(2)} ${y1.toFixed(2)} m ${x2.toFixed(2)} ${y2.toFixed(2)} l S`);
+    const s = String(e.w);
+    setFill([0.2, 0.2, 0.2]);
+    const tx = (x1 + x2) / 2 - 0.5 * state.edgeFont * s.length;
+    ops.push(`BT /F1 ${state.edgeFont.toFixed(2)} Tf ${tx.toFixed(2)} ${((y1 + y2) / 2).toFixed(2)} Td (${esc(s)}) Tj ET`);
+  }
+  const bez = 0.5522847498;
+  for (const n of nodes) {
+    const cx = px(n.x), cy = py(n.y), r = n.r * k * s;
+    setFill(rgb(n.color));
+    setStroke([0, 0, 0]);
+    ops.push("0.800 w");
+    ops.push(`${(cx + r).toFixed(2)} ${cy.toFixed(2)} m`);
+    ops.push(`${(cx + r).toFixed(2)} ${(cy + bez * r).toFixed(2)} ${(cx + bez * r).toFixed(2)} ${(cy + r).toFixed(2)} ${cx.toFixed(2)} ${(cy + r).toFixed(2)} c`);
+    ops.push(`${(cx - bez * r).toFixed(2)} ${(cy + r).toFixed(2)} ${(cx - r).toFixed(2)} ${(cy + bez * r).toFixed(2)} ${(cx - r).toFixed(2)} ${cy.toFixed(2)} c`);
+    ops.push(`${(cx - r).toFixed(2)} ${(cy - bez * r).toFixed(2)} ${(cx - bez * r).toFixed(2)} ${(cy - r).toFixed(2)} ${cx.toFixed(2)} ${(cy - r).toFixed(2)} c`);
+    ops.push(`${(cx + bez * r).toFixed(2)} ${(cy - r).toFixed(2)} ${(cx + r).toFixed(2)} ${(cy - bez * r).toFixed(2)} ${(cx + r).toFixed(2)} ${cy.toFixed(2)} c`);
+    ops.push("B");
+    const size = Math.max(7, Math.min(16, r * 0.5));
+    setFill([0, 0, 0]);
+    const tx = cx - 0.5 * size * n.label.length;
+    ops.push(`BT /F1 ${size.toFixed(2)} Tf ${tx.toFixed(2)} ${cy.toFixed(2)} Td (${esc(n.label)}) Tj ET`);
+  }
+  const content = ops.join("\n");
+  const enc = new TextEncoder();
+  const contentBytes = enc.encode(content);
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW} ${pageH}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  const parts = [enc.encode("%PDF-1.4\n")];
+  const offsets = [];
+  let pos = parts[0].length;
+  for (let i = 0; i < objs.length; i++) {
+    offsets.push(pos);
+    const b = enc.encode(`${i + 1} 0 obj\n${objs[i]}\nendobj\n`);
+    parts.push(b); pos += b.length;
+  }
+  offsets.push(pos);
+  const head = enc.encode(`5 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`);
+  const tail = enc.encode("\nendstream\nendobj\n");
+  parts.push(head); pos += head.length;
+  parts.push(contentBytes); pos += contentBytes.length;
+  parts.push(tail); pos += tail.length;
+  const xrefPos = pos;
+  let xref = `xref\n0 ${objs.length + 2}\n0000000000 65535 f \n`;
+  for (const off of offsets) xref += `${String(off).padStart(10, "0")} 00000 n \n`;
+  xref += `trailer\n<< /Size ${objs.length + 2} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`;
+  parts.push(enc.encode(xref));
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  downloadBlob(new Blob([out], { type: "application/pdf" }), PREFIX + ".pdf");
+}
+
+document.getElementById("export").onclick = () => {
+  const fmt = document.getElementById("exportFormat").value;
+  if (fmt === "png") exportPNG();
+  else if (fmt === "pdf") exportPDF();
+  else exportSVG();
+};
+
+document.getElementById("zin").onclick = () => { k *= 1.2; applyTransform(); };
+document.getElementById("zout").onclick = () => { k /= 1.2; applyTransform(); };
+document.getElementById("fit").onclick = () => {
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 60;
+  const w = (maxX - minX) || 1;
+  const h = (maxY - minY) || 1;
+  k = Math.min((W - 2 * pad) / w, (H - 2 * pad) / h);
+  tx = pad - minX * k + ((W - 2 * pad) - w * k) / 2;
+  ty = pad - minY * k + ((H - 2 * pad) - h * k) / 2;
+  applyTransform();
+};
+
+const repulsionInput = document.getElementById("repulsion");
+repulsionInput.oninput = () => {
+  state.repulsion = parseFloat(repulsionInput.value);
+  document.getElementById("repulsionVal").textContent = state.repulsion.toFixed(1);
+};
+const attractionInput = document.getElementById("attraction");
+attractionInput.oninput = () => {
+  state.attraction = parseFloat(attractionInput.value);
+  document.getElementById("attractionVal").textContent = state.attraction.toFixed(1);
+};
+const speedInput = document.getElementById("speed");
+speedInput.oninput = () => {
+  state.speed = parseInt(speedInput.value, 10);
+  document.getElementById("speedVal").textContent = String(state.speed);
+};
+
+const labelScaleInput = document.getElementById("labelScale");
+labelScaleInput.oninput = () => {
+  state.labelScale = parseFloat(labelScaleInput.value);
+  document.getElementById("labelScaleVal").textContent = state.labelScale.toFixed(1);
+  applyStyle();
+};
+const edgeFontInput = document.getElementById("edgeFont");
+edgeFontInput.oninput = () => {
+  state.edgeFont = parseFloat(edgeFontInput.value);
+  document.getElementById("edgeFontVal").textContent = String(state.edgeFont);
+  applyStyle();
+};
+const edgeWidthInput = document.getElementById("edgeWidth");
+edgeWidthInput.oninput = () => {
+  state.edgeWidth = parseFloat(edgeWidthInput.value);
+  document.getElementById("edgeWidthVal").textContent = state.edgeWidth.toFixed(1);
+  applyStyle();
+};
+
+const mstSelect = document.getElementById("mstAlgo");
+mstSelect.value = state.mstAlgo;
+mstSelect.onchange = () => { state.mstAlgo = mstSelect.value; rebuild(); };
+
+const collapseSelect = document.getElementById("collapse");
+collapseSelect.value = String(state.collapse);
+collapseSelect.onchange = () => { state.collapse = parseFloat(collapseSelect.value); rebuild(); };
+
+const layoutSelect = document.getElementById("layoutMode");
+layoutSelect.value = state.layoutMode;
+layoutSelect.onchange = () => { state.layoutMode = layoutSelect.value; rebuild(); };
+
+function rebuild() {
+  playing = false;
+  playButton.textContent = "▶ Play";
+  playButton.classList.remove("active");
+  buildGraph();
+  computeSnpMean();
+  k = 1; tx = 0; ty = 0;
+  applyTransform();
+}
+
+// ---- matrix upload ----
+function parseMatrix(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+  if (lines.length < 2) throw new Error("matrix has too few lines");
+  const header = lines[0].split("	");
+  const labels = header.slice(1).map(s => s.trim());
+  const n = labels.length;
+  const matrix = new Array(n * n).fill(0);
+  for (let r = 0; r < n; r++) {
+    const fields = lines[r + 1].split("	");
+    for (let c = 0; c < n; c++) {
+      const v = parseFloat(fields[c + 1]);
+      matrix[r * n + c] = Number.isFinite(v) ? v : 0;
+    }
+  }
+  return { n, labels, matrix };
+}
+
+document.getElementById("matrixFile").onchange = ev => {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = parseMatrix(String(reader.result));
+      N = parsed.n;
+      LABELS = parsed.labels;
+      MATRIX = parsed.matrix;
+      PREFIX = (file.name || "mst").replace(/\.[^.]+$/, "");
+      state.collapse = 0;
+      collapseSelect.value = "0";
+      rebuild();
+      startPlay();
+      document.getElementById("hint").textContent =
+        "Loaded " + N + " samples from " + file.name + " - press Play to relax the layout";
+    } catch (err) {
+      alert("Could not parse the matrix: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+};
+
+// ---- go ----
+if (N > 0) {
+  buildGraph();
+  computeSnpMean();
+  startPlay();
+} else {
+  document.getElementById("hint").textContent =
+    "Upload a distance matrix (TSV: first row and column are sample names) to build the MST";
+}
+</script>
+</body>
+</html>
