@@ -32,36 +32,13 @@ publication-ready figure — all locally, with no server and no data leaving you
 
 ---
 
-## Quick start
+## Download & run
 
-### Option 1 — open the file
+1. Go to the [**Releases**](https://github.com/12nucleus/TreeWeaver/releases) page.
+2. Download **`treeweaver.html`** from the latest release.
+3. Open it in any modern browser — that's it.
 
-Download [`treeweaver.html`](treeweaver.html) and open it in any modern browser. That's it.
-
-### Option 2 — GitHub Pages
-
-**GitHub Pages** is GitHub's free static-site hosting: it serves the files of a
-repository over the web, so you can use the app without downloading anything.
-
-Once Pages is enabled for this repository (Settings → Pages → *Deploy from a branch* →
-`main` / root), the app is available at:
-
-```
-https://12nucleus.github.io/TreeWeaver/treeweaver.html
-```
-
-> Because the app file is named `treeweaver.html` (not `index.html`), the URL includes
-> the file name. If you prefer a clean root URL (`https://12nucleus.github.io/TreeWeaver/`),
-> add a tiny `index.html` that redirects to `treeweaver.html`.
-
-### Option 3 — run locally
-
-```bash
-git clone https://github.com/12nucleus/TreeWeaver.git
-cd TreeWeaver
-open treeweaver.html          # macOS
-# or: xdg-open treeweaver.html   (Linux)  /  start treeweaver.html  (Windows)
-```
+No installation, no server, no dependencies. The app runs entirely in your browser.
 
 Then click **Matrix**, choose a `.tsv` distance matrix, and the tree is built and
 animated automatically.
@@ -135,23 +112,6 @@ Files are named after the uploaded matrix and the node label, e.g.
 
 All of this runs in the browser; the full matrix is embedded in the page (or read from
 your uploaded file).
-
----
-
-## Generating prebuilt pages (optional)
-
-The repository also ships a small Python generator, [`make_mst.py`](make_mst.py), which
-can produce a prebuilt page with a matrix already embedded, or the standalone app:
-
-```bash
-# standalone app (no embedded matrix)
-python3 make_mst.py --app --out-prefix treeweaver
-
-# prebuilt page from a matrix
-python3 make_mst.py --matrix examples/example_matrix.tsv --out-prefix example --collapse 0
-```
-
-It only needs `numpy` and the standard library.
 
 ---
 
