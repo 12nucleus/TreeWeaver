@@ -21,12 +21,17 @@ publication-ready figure — all locally, with no server and no data leaving you
   single nodes sized by the number of samples they contain.
 - **Four layout modes**:
   - *Spring* — uniform repulsion + SNP-scaled spring rest length.
-  - *SNP-weighted repulsion* — repulsion scaled by the SNP distance between nodes.
+  - *SNP-weighted repulsion* — repulsion scaled by the SNP distance between nodes,
+    with stronger springs and a wider rest-length range so edge length visibly
+    tracks SNP distance.
   - *Stress (MDS)* — Kamada-Kawai stress layout (edge length tracks SNP distance).
   - *Stiff springs* — stronger springs so rest lengths dominate.
 - **Live force simulation** with Play/Pause, plus Repulsion / Attraction / Speed sliders.
 - **Styling controls** — node-label size, edge-label font size, edge thickness.
-- **Export** to **SVG**, **PNG**, and **PDF** (vector), matching exactly what you see.
+- **Export** to **SVG**, **PNG**, **PDF** (vector), or a standalone **HTML** file —
+  matching exactly what you see. The HTML export embeds the metadata table and stays
+  interactive: pan/zoom, hover tooltips, legend, and live re-coloring by any metadata
+  column (pie or mixed mode), plus label/edge font-size controls — ideal for sharing.
 - **Per-node downloads** — hover a node to download its sample list and its sub-SNP matrix.
 - **Metadata coloring** — upload a metadata table (TSV/CSV: first column = sample name,
   one column per metadata field) and color nodes by any column. Nodes mixing several
@@ -81,7 +86,7 @@ A ready-to-use example is provided in
 | **Matrix** | Upload a `.tsv` distance matrix. |
 | **▶ Play / ⏸ Pause** | Start/stop the live force simulation. |
 | **Reset** | Restore the initial layout. |
-| **Export + Download** | Save the current view as SVG, PNG, or PDF. |
+| **Export + Download** | Save the current view as SVG, PNG, PDF, or a standalone interactive HTML (keeps pan/zoom, tooltips, legend, metadata re-coloring, and font-size controls). |
 | **Zoom + / Zoom − / Fit** | Zoom and re-frame the view. |
 | **MST** | Choose Prim, Kruskal, or Boruvka. |
 | **Collapse** | Merge samples within 0–10 SNPs into single nodes. |

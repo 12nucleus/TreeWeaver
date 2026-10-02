@@ -45,7 +45,7 @@
   <label>Matrix <input type="file" id="matrixFile" accept=".tsv,.txt,.csv,.tab"></label>
   <button id="play">&#9654; Play</button>
   <button id="reset">Reset</button>
-  <label>Export <select id="exportFormat"><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
+  <label>Export <select id="exportFormat"><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option><option value="html">HTML</option></select></label>
   <button id="export">Download</button>
   <button id="zin">Zoom +</button>
   <button id="zout">Zoom &minus;</button>
@@ -53,7 +53,7 @@
   <label>MST <select id="mstAlgo"><option value="prim">Prim</option><option value="kruskal">Kruskal</option><option value="boruvka">Boruvka</option></select></label>
   <label>Collapse <select id="collapse"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="8">8</option><option value="10">10</option></select></label>
   <label>Layout <select id="layoutMode"><option value="spring">Spring</option><option value="snp">SNP-weighted repulsion</option><option value="stress">Stress (MDS)</option><option value="stiff">Stiff springs</option></select></label>
-  <label>Repulsion <input type="range" id="repulsion" min="0.1" max="10" step="0.1" value="10"><span class="val" id="repulsionVal">10.0</span></label>
+  <label>Repulsion <input type="range" id="repulsion" min="0.1" max="50" step="0.1" value="10"><span class="val" id="repulsionVal">10.0</span></label>
   <label>Attraction <input type="range" id="attraction" min="0.1" max="10" step="0.1" value="0.1"><span class="val" id="attractionVal">0.1</span></label>
   <label>Speed <input type="range" id="speed" min="1" max="20" step="1" value="10"><span class="val" id="speedVal">10</span></label>
   <label>Label size <input type="range" id="labelScale" min="0.3" max="3" step="0.1" value="1"><span class="val" id="labelScaleVal">1.0</span></label>
@@ -388,8 +388,10 @@ function layoutSnp(iterations) {
   if (n < 2) return;
   const ideal = 700 / Math.sqrt(n);
   const repulsion = ideal * ideal * state.repulsion;
-  const attraction = state.attraction;
-  const rest = edges.map(e => ideal * (1 + 0.5 * Math.log1p(e.w)));
+  // Stronger springs + a wider rest-length range in this mode so that edge
+  // lengths visibly track SNP distance instead of being set by repulsion alone.
+  const attraction = state.attraction * 3.0;
+  const rest = edges.map(e => ideal * (1 + 2 * Math.log1p(e.w)));
   const cd = [];
   let sum = 0, cnt = 0;
   for (let a = 0; a < n; a++) {
@@ -773,8 +775,8 @@ function layoutStep(temp) {
   if (n < 2) return;
   const ideal = 700 / Math.sqrt(n);
   const repulsion = ideal * ideal * state.repulsion;
-  const attraction = state.attraction * (state.layoutMode === "stiff" ? 3.0 : 1.0);
   const useSnp = state.layoutMode === "snp";
+  const attraction = state.attraction * ((state.layoutMode === "stiff" || useSnp) ? 3.0 : 1.0);
   const dx = new Float64Array(n);
   const dy = new Float64Array(n);
   for (let i = 0; i < n; i++) {
@@ -798,7 +800,7 @@ function layoutStep(temp) {
     const a = nodes[e.s], b = nodes[e.t];
     const ddx = a.x - b.x, ddy = a.y - b.y;
     const d = Math.sqrt(ddx * ddx + ddy * ddy) || 1e-4;
-    const rest = ideal * (1 + 0.5 * Math.log1p(e.w));
+    const rest = ideal * (1 + (useSnp ? 2 : 0.5) * Math.log1p(e.w));
     const f = attraction * (d - rest);
     const ux = ddx / d, uy = ddy / d;
     dx[a.id] -= f * ux; dy[a.id] -= f * uy;
@@ -1021,10 +1023,195 @@ function exportPDF() {
   downloadBlob(new Blob([out], { type: "application/pdf" }), PREFIX + ".pdf");
 }
 
+// Standalone interactive HTML snapshot of the current view: same pan/zoom,
+// colors/pies, hover tooltips and legend — plus the full metadata table
+// embedded, so the recipient can re-color the tree by any metadata column
+// (pie or mixed mode) directly in the exported file. No dependencies,
+// works offline.
+function exportHTML() {
+  const clone = cloneView();
+  clone.removeAttribute("width");
+  clone.removeAttribute("height");
+  clone.setAttribute("style", "width:100vw;height:100vh;display:block;background:#ffffff;cursor:grab;touch-action:none;");
+  const gRootClone = clone.querySelector("g");
+  gRootClone.id = "gRoot";
+  const nodeGroups = gRootClone.children[1]
+    ? Array.from(gRootClone.children[1].children).filter(el => el.tagName === "g")
+    : [];
+  // Native hover tooltips (also useful when no metadata is loaded).
+  nodes.forEach((n, i) => {
+    const grp = nodeGroups[i];
+    if (!grp) return;
+    grp.style.cursor = "default";
+    const ttl = document.createElementNS(NS, "title");
+    let txt = n.label + " — samples: " + n.count + "\n" +
+      n.membersIdx.map(j => LABELS[j]).join(", ");
+    if (n.metaCounts) {
+      txt += "\n" + metaState.col + ": " +
+        [...n.metaCounts.entries()].map(([cat, cnt]) => cat + " (" + cnt + ")").join(", ");
+    }
+    ttl.textContent = txt;
+    grp.insertBefore(ttl, grp.firstChild);
+  });
+  const hasMeta = metaState.col && META.bySample.size > 0;
+  // Embed everything the exported page needs to re-color nodes on its own.
+  const embed = {
+    labels: LABELS,
+    columns: META.columns,
+    meta: Object.fromEntries(META.bySample),
+    color: { col: metaState.col, mode: metaState.mode, mixed: metaState.mixedColor },
+    nodes: nodes.map(n => ({
+      label: n.label, count: n.count, r: n.r,
+      members: n.membersIdx,
+    })),
+  };
+  const escTitle = (PREFIX + " — minimum spanning tree").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const escOpt = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  // Toolbar shown in the exported file (only when metadata is available).
+  const colOptions = META.columns.map(c =>
+    '<option value="' + escOpt(c) + '"' + (c === metaState.col ? " selected" : "") + ">" +
+    escOpt(c) + "</option>").join("");
+  const fontControls =
+    '<label>Label size <input type="range" id="labelSize" min="0.3" max="3" step="0.1" value="1"></label>' +
+    '<label>Edge font <input type="range" id="edgeFont" min="4" max="24" step="1" value="' + state.edgeFont + '"></label>';
+  const toolbarHtml =
+    '<div id="toolbar">' +
+    (hasMeta
+      ? '<label>Color by <select id="colorBy">' + colOptions + "</select></label>" +
+        '<label>Node color <select id="colorMode">' +
+        '<option value="pie"' + (metaState.mode === "pie" ? " selected" : "") + ">Pie chart</option>" +
+        '<option value="mixed"' + (metaState.mode === "mixed" ? " selected" : "") + ">Mixed color</option>" +
+        "</select></label>" +
+        '<label>Mixed <input type="color" id="mixedColor" value="' + escOpt(metaState.mixedColor) + '"></label>' +
+        '<button id="legendToggle">Legend</button>'
+      : "") +
+    fontControls + "</div>";
+  const legendHtml = hasMeta ? '<div id="legend"><div id="legendItems"></div></div>' : "";
+  const pageScript =
+    "var EMBED=" + JSON.stringify(embed).replace(/</g, "\\u003c") + ";\n" +
+    "var NS='http://www.w3.org/2000/svg',NA_COLOR='#d9d9d9';\n" +
+    "var svg=document.querySelector('svg'),gRoot=document.getElementById('gRoot');\n" +
+    // pan / zoom
+    "var k=" + k + ",tx=" + tx + ",ty=" + ty + ",W=" + W + ",H=" + H + ";\n" +
+    "function ap(){gRoot.setAttribute('transform','translate('+tx+','+ty+') scale('+k+')');}ap();\n" +
+    "var pan=false,ps={x:0,y:0};\n" +
+    "svg.addEventListener('wheel',function(e){e.preventDefault();" +
+    "var pt=svg.createSVGPoint();pt.x=e.clientX;pt.y=e.clientY;" +
+    "var p=pt.matrixTransform(svg.getScreenCTM().inverse());" +
+    "var f=e.deltaY<0?1.15:1/1.15;var nk=Math.max(0.01,Math.min(25,k*f));" +
+    "tx=p.x-(p.x-tx)*(nk/k);ty=p.y-(p.y-ty)*(nk/k);k=nk;ap();},{passive:false});\n" +
+    "svg.addEventListener('pointerdown',function(e){pan=true;ps={x:e.clientX,y:e.clientY};});\n" +
+    "window.addEventListener('pointermove',function(e){if(!pan)return;" +
+    "var r=svg.getBoundingClientRect();" +
+    "tx+=(e.clientX-ps.x)/r.width*W;ty+=(e.clientY-ps.y)/r.height*H;" +
+    "ps={x:e.clientX,y:e.clientY};ap();});\n" +
+    "window.addEventListener('pointerup',function(){pan=false;});\n" +
+    // color helpers (same palette rules as TreeWeaver)
+    "function hsv(h,s,v){var c=v*s,x=c*(1-Math.abs((h*6)%2-1)),m=v-c,hh=Math.floor(h*6)%6,r,g,b;" +
+    "if(hh===0){r=c;g=x;b=0;}else if(hh===1){r=x;g=c;b=0;}else if(hh===2){r=0;g=c;b=x;}" +
+    "else if(hh===3){r=0;g=x;b=c;}else if(hh===4){r=x;g=0;b=c;}else{r=c;g=0;b=x;}" +
+    "var t=function(q){return Math.round((q+m)*255).toString(16).padStart(2,'0');};" +
+    "return '#'+t(r)+t(g)+t(b);}\n" +
+    "function palette(n){var out=[];for(var i=0;i<n;i++){" +
+    "out.push(hsv((i*0.618033988749895)%1,0.55+0.25*((i%3)/2),0.85-0.15*(i%2)));}return out;}\n" +
+    "var nodeGroups=Array.prototype.filter.call(gRoot.children[1].children,function(el){return el.tagName==='g';});\n" +
+    "function catVal(lab,col){var rec=EMBED.meta[lab];" +
+    "return (rec&&rec[col]!==''&&rec[col]!=null)?String(rec[col]):'(no data)';}\n" +
+    "function wedge(r,a0,a1,color){" +
+    "var x0=r*Math.cos(a0),y0=r*Math.sin(a0),x1=r*Math.cos(a1),y1=r*Math.sin(a1);" +
+    "var p=document.createElementNS(NS,'path');" +
+    "p.setAttribute('d','M0 0 L'+x0.toFixed(3)+' '+y0.toFixed(3)+' A'+r+' '+r+' 0 '+((a1-a0)>Math.PI?1:0)+' 1 '+x1.toFixed(3)+' '+y1.toFixed(3)+' Z');" +
+    "p.setAttribute('fill',color);return p;}\n" +
+    "function applyColors(){\n" +
+    "var colEl=document.getElementById('colorBy');if(!colEl)return;\n" +
+    "var col=colEl.value,mode=document.getElementById('colorMode').value," +
+    "mixed=document.getElementById('mixedColor').value;\n" +
+    // category colors in first-appearance order over the sample labels
+    "var cats=[],seen={};EMBED.labels.forEach(function(lab){var v=catVal(lab,col);" +
+    "if(v!=='(no data)'&&!seen[v]){seen[v]=1;cats.push(v);}});\n" +
+    "var pal=palette(cats.length),catColor={};cats.forEach(function(c,i){catColor[c]=pal[i];});\n" +
+    "var cc=function(c){return c==='(no data)'?NA_COLOR:catColor[c];};\n" +
+    // re-draw every node group: title tooltip + solid fill or pie wedges
+    "EMBED.nodes.forEach(function(n,i){var grp=nodeGroups[i];if(!grp)return;\n" +
+    "while(grp.firstChild)grp.removeChild(grp.firstChild);\n" +
+    "var counts={},order=[];n.members.forEach(function(j){var c=catVal(EMBED.labels[j],col);" +
+    "if(!counts[c]){counts[c]=0;order.push(c);}counts[c]++;});\n" +
+    "order.sort(function(a,b){return counts[b]-counts[a]||(a<b?-1:1);});\n" +
+    "var ttl=document.createElementNS(NS,'title');" +
+    "ttl.textContent=n.label+' -- samples: '+n.count+'\\n'+" +
+    "n.members.map(function(j){return EMBED.labels[j];}).join(', ')+'\\n'+col+': '+" +
+    "order.map(function(c){return c+' ('+counts[c]+')';}).join(', ');" +
+    "grp.appendChild(ttl);\n" +
+    "var circle=document.createElementNS(NS,'circle');circle.setAttribute('r',n.r);" +
+    "circle.setAttribute('stroke','black');circle.setAttribute('stroke-width','0.8');\n" +
+    "if(order.length===1){circle.setAttribute('fill',cc(order[0]));grp.appendChild(circle);}\n" +
+    "else if(mode==='pie'){var a0=-Math.PI/2;order.forEach(function(c){" +
+    "var a1=a0+(counts[c]/n.count)*2*Math.PI;" +
+    "grp.appendChild(wedge(n.r,a0,a1-1e-9,cc(c)));a0=a1;});" +
+    "circle.setAttribute('fill','none');grp.appendChild(circle);}\n" +
+    "else{circle.setAttribute('fill',mixed);grp.appendChild(circle);}\n" +
+    "});\n" +
+    // rebuild legend
+    "var li=document.getElementById('legendItems');" +
+    "li.innerHTML='';" +
+    "var t=document.createElement('div');t.style.fontWeight='bold';t.textContent=col;li.appendChild(t);\n" +
+    "var totals={};EMBED.labels.forEach(function(lab){var v=catVal(lab,col);" +
+    "totals[v]=(totals[v]||0)+1;});\n" +
+    "Object.keys(totals).sort(function(a,b){return totals[b]-totals[a]||(a<b?-1:1);})" +
+    ".forEach(function(c){var row=document.createElement('div');" +
+    "row.innerHTML='<span class=\"swatch\" style=\"background:'+cc(c)+'\"></span><span>'+c+" +
+    "'</span><span class=\"count\">('+totals[c]+')</span>';li.appendChild(row);});\n" +
+    "if(mode==='mixed'){var row=document.createElement('div');" +
+    "row.innerHTML='<span class=\"swatch\" style=\"background:'+mixed+'\"></span><span>(mixed)</span>';" +
+    "li.appendChild(row);}\n" +
+    "}\n" +
+    // font-size controls: scale node labels relative to the exported view,
+    // set edge labels in absolute px
+    "var edgeTexts=Array.prototype.filter.call(gRoot.children[0].children,function(el){return el.tagName==='text';});\n" +
+    "var nodeTexts=Array.prototype.filter.call(gRoot.children[1].children,function(el){return el.tagName==='text';});\n" +
+    "var nBase=nodeTexts.map(function(t){return parseFloat(t.getAttribute('font-size'));});\n" +
+    "document.getElementById('labelSize').oninput=function(){var v=parseFloat(this.value);" +
+    "nodeTexts.forEach(function(t,i){t.setAttribute('font-size',nBase[i]*v);});};\n" +
+    "document.getElementById('edgeFont').oninput=function(){var v=parseFloat(this.value);" +
+    "edgeTexts.forEach(function(t){t.setAttribute('font-size',v);});};\n" +
+    "var cb=document.getElementById('colorBy');\n" +
+    "if(cb){cb.onchange=applyColors;\n" +
+    "document.getElementById('colorMode').onchange=applyColors;\n" +
+    "document.getElementById('mixedColor').oninput=applyColors;\n" +
+    "var lg=document.getElementById('legend'),lb=document.getElementById('legendToggle');\n" +
+    "lb.onclick=function(){lg.style.display=lg.style.display==='none'?'block':'none';};\n" +
+    "applyColors();}\n";
+  const htmlDoc =
+    "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n" +
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n" +
+    "<title>" + escTitle + "</title>\n<style>\n" +
+    "html,body{margin:0;height:100%;font-family:-apple-system,Segoe UI,Roboto,sans-serif;}\n" +
+    "#toolbar{position:fixed;top:10px;left:10px;z-index:10;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}\n" +
+    "#toolbar label{font-size:12px;color:#333;display:flex;align-items:center;gap:4px;" +
+    "background:rgba(255,255,255,0.92);padding:3px 8px;border-radius:5px;border:1px solid #ddd;}\n" +
+    "#toolbar select{font-size:12px;padding:3px 4px;border:1px solid #ccc;border-radius:4px;background:#fff;color:#333;}\n" +
+    "#toolbar button{font-size:13px;padding:5px 10px;border:1px solid #bbb;border-radius:5px;background:#f7f7f7;cursor:pointer;}\n" +
+    "#toolbar input[type=color]{width:26px;height:20px;padding:0;border:1px solid #bbb;border-radius:4px;background:#fff;cursor:pointer;}\n" +
+    "#legend{position:fixed;top:52px;right:10px;z-index:10;background:rgba(255,255,255,0.95);" +
+    "border:1px solid #bbb;border-radius:6px;padding:6px 10px;font-size:12px;max-width:280px;" +
+    "max-height:80vh;overflow-y:auto;box-shadow:0 2px 6px rgba(0,0,0,0.15);}\n" +
+    "#legend #legendItems div{display:flex;align-items:center;gap:6px;padding:1px 0;}\n" +
+    "#legend .swatch{width:12px;height:12px;border-radius:50%;border:1px solid #555;flex:none;display:inline-block;}\n" +
+    "#legend .count{color:#888;font-size:11px;}\n" +
+    "#hint{position:fixed;bottom:10px;left:10px;font-size:12px;color:#666;}\n" +
+    "</style>\n</head>\n<body>\n" +
+    toolbarHtml + "\n" + legendHtml + "\n" +
+    clone.outerHTML + "\n" +
+    '<div id="hint">' + escTitle + " &middot; scroll to zoom &middot; drag to pan &middot; hover a node for details</div>\n" +
+    "<scr" + "ipt>" + pageScript + "</scr" + "ipt>\n</body>\n</html>\n";
+  downloadBlob(new Blob([htmlDoc], { type: "text/html" }), PREFIX + ".html");
+}
+
 document.getElementById("export").onclick = () => {
   const fmt = document.getElementById("exportFormat").value;
   if (fmt === "png") exportPNG();
   else if (fmt === "pdf") exportPDF();
+  else if (fmt === "html") exportHTML();
   else exportSVG();
 };
 
