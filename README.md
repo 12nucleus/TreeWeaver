@@ -28,6 +28,13 @@ publication-ready figure — all locally, with no server and no data leaving you
 - **Styling controls** — node-label size, edge-label font size, edge thickness.
 - **Export** to **SVG**, **PNG**, and **PDF** (vector), matching exactly what you see.
 - **Per-node downloads** — hover a node to download its sample list and its sub-SNP matrix.
+- **Metadata coloring** — upload a metadata table (TSV/CSV: first column = sample name,
+  one column per metadata field) and color nodes by any column. Nodes mixing several
+  categories are drawn as **pie charts**, or in a single user-chosen "mixed" color.
+  A toggleable legend shows the category colors and sample counts.
+- **Reproducible trees** — MST tie-breaking is based on sample *names*, not matrix row
+  order, so the same samples always yield the same tree regardless of how the matrix
+  is ordered or which algorithm is selected.
 - **Fully client-side** — one HTML file, no dependencies, no tracking.
 
 ---
@@ -81,6 +88,10 @@ A ready-to-use example is provided in
 | **Layout** | Spring, SNP-weighted repulsion, Stress (MDS), or Stiff springs. |
 | **Repulsion / Attraction / Speed** | Tune the force simulation. |
 | **Label size / Edge font / Edge width** | Style the figure. |
+| **Metadata** | Upload a metadata table (`.tsv` or `.csv`; first column = sample name, one header row, one column per field). |
+| **Color by** | Pick the metadata column used to color nodes. |
+| **Node color** | *Pie chart* — mixed nodes show one wedge per category; *Mixed color* — mixed nodes use a single color chosen with the color picker. |
+| **Legend** | Show/hide the category legend (also hides when its header is clicked). |
 
 **Mouse:** drag a node to pin and move it · drag the background to pan · scroll to zoom ·
 hover a node for details and per-node downloads.
@@ -171,17 +182,24 @@ Merges components by repeatedly taking each component's cheapest outgoing edge.
 
 ### Tie-breaking
 
-When several edges share the same weight, the three algorithms may pick different ones,
-so the **tree shape can differ even though the total weight is identical**. This is very
-common with SNP data, where many distances are 0 or 1.
+When several edges share the same weight, an MST is **not unique** — different equally
+valid trees exist. This is very common with SNP data, where many distances are 0 or 1.
+To keep results reproducible, TreeWeaver resolves every tie using the **sample names**,
+not the matrix row/column order:
 
-- **Prim** — scans nodes in index order and keeps the first minimum found, so ties are
-  resolved by the **lowest node index**.
-- **Kruskal** — sorts edges by weight with a **stable** sort, so among equal-weight edges
-  the one appearing first in the edge list (row-major order of the matrix) is considered
-  first; the first one that joins two different components is kept.
-- **Boruvka** — for each component, scans candidate edges in index order and keeps the
-  first strictly-cheaper edge, so ties go to the **lowest-index neighbour**.
+- among equal-weight edges, the edge whose endpoint labels are lexicographically
+  smallest wins;
+- **Prim** additionally starts from the sample with the smallest label, and when two
+  candidate parents give the same distance, the parent with the smaller label wins.
+
+Because all three algorithms apply the same label-based rule, they produce the
+**same tree**, and re-ordering or re-numbering the matrix never changes the result.
+Note that *subsampling* can still legitimately change the tree: removing samples changes
+the graph itself (e.g. which pair of samples forms the cheapest bridge between two
+distant clusters), and some MSTs of the full dataset simply no longer exist once nodes
+are gone — this is a property of MSTs, not of this tool. The force-directed *layout*
+is randomized per load, so the drawing can look different even when the topology is
+identical; comparing exported edge lists is the reliable check.
 
 ### Collapsing and transitivity
 

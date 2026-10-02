@@ -27,6 +27,17 @@
   #tooltip button { font-size: 11px; margin: 5px 4px 0 0; padding: 3px 7px; border: 1px solid #bbb;
                     border-radius: 4px; background: #f7f7f7; cursor: pointer; }
   #tooltip button:hover { background: #eaeaea; }
+  #toolbar input[type=color] { width: 26px; height: 20px; padding: 0; border: 1px solid #bbb;
+                               border-radius: 4px; background: #fff; cursor: pointer; }
+  #legend { position: fixed; top: 52px; right: 10px; z-index: 10; display: none;
+            background: rgba(255,255,255,0.95); border: 1px solid #bbb; border-radius: 6px;
+            padding: 6px 10px; font-size: 12px; max-width: 240px; max-height: 70vh;
+            overflow-y: auto; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }
+  #legendHeader { font-weight: bold; cursor: pointer; margin-bottom: 4px; user-select: none; }
+  #legendItems div { display: flex; align-items: center; gap: 6px; padding: 1px 0; cursor: default; }
+  #legendItems .swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #555;
+                         flex: none; display: inline-block; }
+  #legendItems .count { color: #888; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -48,7 +59,13 @@
   <label>Label size <input type="range" id="labelScale" min="0.3" max="3" step="0.1" value="1"><span class="val" id="labelScaleVal">1.0</span></label>
   <label>Edge font <input type="range" id="edgeFont" min="4" max="24" step="1" value="11"><span class="val" id="edgeFontVal">11</span></label>
   <label>Edge width <input type="range" id="edgeWidth" min="0.5" max="6" step="0.1" value="1.2"><span class="val" id="edgeWidthVal">1.2</span></label>
+  <label>Metadata <input type="file" id="metaFile" accept=".tsv,.txt,.csv,.tab"></label>
+  <label>Color by <select id="metaCol"><option value="">(none)</option></select></label>
+  <label id="metaModeLabel">Node color <select id="metaMode"><option value="pie">Pie chart</option><option value="mixed">Mixed color</option></select></label>
+  <label id="mixedColorLabel">Mixed <input type="color" id="mixedColor" value="#8a8a8a"></label>
+  <button id="legendToggle" style="display:none">Legend</button>
 </div>
+<div id="legend"><div id="legendHeader">Legend <span style="color:#888">(click to hide)</span></div><div id="legendItems"></div></div>
 <div id="hint">Press Play to relax the layout &middot; tune Repulsion/Attraction &middot; drag a node to pin it &middot; drag the background to pan &middot; scroll to zoom &middot; hover for details</div>
 <svg id="graph"></svg>
 <div id="tooltip"></div>
@@ -92,21 +109,114 @@ let initial = [];
 let nodeObjs = [];
 let edgeObjs = [];
 
+// ---- metadata ----
+const META = { columns: [], bySample: new Map() };  // bySample: label -> {col: value}
+const metaState = { col: "", mode: "pie", mixedColor: "#8a8a8a" };
+let catColors = new Map();   // category -> color (for the active column)
+const NA_COLOR = "#d9d9d9";  // samples without a metadata value
+
+function parseMetadata(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+  if (lines.length < 2) throw new Error("metadata table has too few lines");
+  const delim = lines[0].includes("\t") ? "\t" : ",";
+  const header = lines[0].split(delim).map(s => s.trim());
+  if (header.length < 2) throw new Error("metadata table needs a sample column plus at least one metadata column");
+  const columns = header.slice(1);
+  const bySample = new Map();
+  for (let r = 1; r < lines.length; r++) {
+    const fields = lines[r].split(delim);
+    const name = String(fields[0] || "").trim();
+    if (!name) continue;
+    const rec = {};
+    columns.forEach((col, i) => { rec[col] = String(fields[i + 1] == null ? "" : fields[i + 1]).trim(); });
+    bySample.set(name, rec);
+  }
+  if (bySample.size === 0) throw new Error("no sample rows found in metadata table");
+  return { columns, bySample };
+}
+
+// Assign a stable distinct color to each category of the active column,
+// ordered by first appearance in the matrix labels for reproducibility.
+function computeCategoryColors() {
+  catColors = new Map();
+  if (!metaState.col) return;
+  const cats = [];
+  const seen = new Set();
+  for (let i = 0; i < N; i++) {
+    const rec = META.bySample.get(LABELS[i]);
+    const v = (rec && rec[metaState.col] !== "") ? rec[metaState.col] : null;
+    if (v !== null && !seen.has(v)) { seen.add(v); cats.push(v); }
+  }
+  const palette = distinctColors(cats.length);
+  cats.forEach((c, i) => catColors.set(c, palette[i]));
+}
+
+// Compute per-node metadata counts and the fill (solid color or pie slices).
+function computeNodeColors() {
+  nodes.forEach(n => { n.pie = null; n.metaCounts = null; });
+  if (!metaState.col || META.bySample.size === 0) return;
+  for (const n of nodes) {
+    const counts = new Map();
+    for (const i of n.membersIdx) {
+      const rec = META.bySample.get(LABELS[i]);
+      const v = (rec && rec[metaState.col] !== "" && rec[metaState.col] != null) ? rec[metaState.col] : null;
+      const key = v === null ? "(no data)" : v;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    n.metaCounts = counts;
+    const catColor = (cat) => cat === "(no data)" ? NA_COLOR : catColors.get(cat);
+    if (counts.size === 1) {
+      n.color = catColor([...counts.keys()][0]);
+    } else if (metaState.mode === "pie") {
+      n.pie = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+        .map(([cat, cnt]) => ({ cat, frac: cnt / n.count, color: catColor(cat) }));
+      n.color = metaState.mixedColor; // fallback (e.g. label contrast, PDF stroke)
+    } else {
+      n.color = metaState.mixedColor;
+    }
+  }
+}
+
 // ---- MST algorithms ----
+// Tie-breaking is based on sample LABELS (not matrix indices), so the same
+// underlying samples resolve equal-weight ties identically no matter how the
+// matrix is ordered or subsampled. All three algorithms use the same rule:
+// among equal weights, prefer the edge whose endpoint labels are
+// lexicographically smallest.
+function labelCmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
+// Canonical (order-independent) tie key for an edge between samples i and j.
+function edgeTieKey(i, j) {
+  const a = LABELS[i], b = LABELS[j];
+  return a < b ? a + "" + b : b + "" + a;
+}
+
 function mstPrim() {
   const inTree = new Uint8Array(N);
   const best = new Float64Array(N).fill(Infinity);
   const parent = new Int32Array(N).fill(-1);
-  best[0] = 0;
+  // Start from the sample with the smallest label (stable across subsampling).
+  let start = 0;
+  for (let i = 1; i < N; i++) if (LABELS[i] < LABELS[start]) start = i;
+  best[start] = 0;
   const out = [];
   for (let it = 0; it < N; it++) {
-    let u = -1, bv = Infinity;
-    for (let i = 0; i < N; i++) if (!inTree[i] && best[i] < bv) { bv = best[i]; u = i; }
+    let u = -1;
+    for (let i = 0; i < N; i++) {
+      if (inTree[i]) continue;
+      if (u === -1 || best[i] < best[u] ||
+          (best[i] === best[u] && labelCmp(LABELS[i], LABELS[u]) < 0)) u = i;
+    }
     if (u === -1) break;
     inTree[u] = 1;
     if (parent[u] !== -1) out.push({ s: parent[u], t: u, w: snp(parent[u], u) });
     for (let v = 0; v < N; v++) {
-      if (!inTree[v]) { const w = snp(u, v); if (w < best[v]) { best[v] = w; parent[v] = u; } }
+      if (inTree[v]) continue;
+      const w = snp(u, v);
+      if (w < best[v] ||
+          (w === best[v] && parent[v] !== -1 && labelCmp(LABELS[u], LABELS[parent[v]]) < 0)) {
+        best[v] = w; parent[v] = u;
+      }
     }
   }
   return out;
@@ -115,7 +225,10 @@ function mstPrim() {
 function mstKruskal() {
   const all = [];
   for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) all.push([snp(i, j), i, j]);
-  all.sort((a, b) => a[0] - b[0]);
+  // Sort by weight, then by endpoint labels, so ties break identically
+  // regardless of matrix row order.
+  all.sort((a, b) => a[0] - b[0] ||
+    labelCmp(LABELS[a[1]], LABELS[b[1]]) || labelCmp(LABELS[a[2]], LABELS[b[2]]));
   const parent = new Int32Array(N);
   for (let i = 0; i < N; i++) parent[i] = i;
   function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
@@ -142,7 +255,11 @@ function mstBoruvka() {
       for (let j = 0; j < N; j++) {
         if (i === j || find(j) === ri) continue;
         const w = snp(i, j);
-        if (w < cheapestW[ri]) { cheapestW[ri] = w; cheapestFrom[ri] = i; cheapestTo[ri] = j; }
+        if (w < cheapestW[ri] ||
+            (w === cheapestW[ri] &&
+             edgeTieKey(i, j) < edgeTieKey(cheapestFrom[ri], cheapestTo[ri]))) {
+          cheapestW[ri] = w; cheapestFrom[ri] = i; cheapestTo[ri] = j;
+        }
       }
     }
     let merged = 0;
@@ -408,6 +525,8 @@ function buildGraph() {
   edges = cedges.map(e => ({ s: e.s, t: e.t, w: e.w }));
   byId = {};
   nodes.forEach(n => { byId[n.id] = n; });
+  computeCategoryColors();
+  computeNodeColors();
   layoutInitial();
   normalize();
   initial = nodes.map(n => ({ x: n.x, y: n.y }));
@@ -415,6 +534,17 @@ function buildGraph() {
 }
 
 // ---- render ----
+// SVG path for a pie wedge of radius r from angle a0 to a1 (radians, y-down screen space).
+function wedgeEl(r, a0, a1, color) {
+  const x0 = r * Math.cos(a0), y0 = r * Math.sin(a0);
+  const x1 = r * Math.cos(a1), y1 = r * Math.sin(a1);
+  const large = (a1 - a0) > Math.PI ? 1 : 0;
+  const p = document.createElementNS(NS, "path");
+  p.setAttribute("d", `M0 0 L${x0.toFixed(3)} ${y0.toFixed(3)} A${r} ${r} 0 ${large} 1 ${x1.toFixed(3)} ${y1.toFixed(3)} Z`);
+  p.setAttribute("fill", color);
+  return p;
+}
+
 function render() {
   while (edgeLayer.firstChild) edgeLayer.removeChild(edgeLayer.firstChild);
   while (nodeLayer.firstChild) nodeLayer.removeChild(nodeLayer.firstChild);
@@ -435,13 +565,29 @@ function render() {
     edgeObjs.push({ e, line, label });
   }
   for (const n of nodes) {
+    const grp = document.createElementNS(NS, "g");
+    nodeLayer.appendChild(grp);
     const c = document.createElementNS(NS, "circle");
     c.setAttribute("r", n.r);
-    c.setAttribute("fill", n.color);
-    c.setAttribute("stroke", "black");
-    c.setAttribute("stroke-width", "0.8");
-    c.style.cursor = "grab";
-    nodeLayer.appendChild(c);
+    if (n.pie && n.pie.length > 1) {
+      // Pie node: one wedge per category, plus a full-circle outline on top.
+      let a0 = -Math.PI / 2;
+      for (const s of n.pie) {
+        const a1 = a0 + s.frac * 2 * Math.PI;
+        grp.appendChild(wedgeEl(n.r, a0, a1 - 1e-9, s.color));
+        a0 = a1;
+      }
+      c.setAttribute("fill", "none");
+      c.setAttribute("stroke", "black");
+      c.setAttribute("stroke-width", "0.8");
+      grp.appendChild(c);
+    } else {
+      c.setAttribute("fill", n.color);
+      c.setAttribute("stroke", "black");
+      c.setAttribute("stroke-width", "0.8");
+      grp.appendChild(c);
+    }
+    grp.style.cursor = "grab";
     const t = document.createElementNS(NS, "text");
     t.setAttribute("text-anchor", "middle");
     t.setAttribute("dominant-baseline", "middle");
@@ -449,29 +595,34 @@ function render() {
     t.setAttribute("pointer-events", "none");
     t.textContent = n.label;
     nodeLayer.appendChild(t);
-    const o = { n, c, t };
+    const o = { n, grp, c, t };
     nodeObjs.push(o);
-    c.addEventListener("pointerdown", ev => {
+    grp.addEventListener("pointerdown", ev => {
       ev.stopPropagation();
       ev.preventDefault();
       drag = o;
       o.n.pinned = true;
       const p = clientToGraph(ev);
       dragOffset = { x: o.n.x - p.x, y: o.n.y - p.y };
-      c.setPointerCapture(ev.pointerId);
-      c.style.cursor = "grabbing";
+      grp.setPointerCapture(ev.pointerId);
+      grp.style.cursor = "grabbing";
     });
-    c.addEventListener("mouseenter", ev => {
+    grp.addEventListener("mouseenter", ev => {
       clearTimeout(hideTimer);
       hoverNode = o;
-      tip.innerHTML = `<b>${o.n.label}</b><br>samples: ${o.n.count}<br>${o.n.members}` +
+      let extra = "";
+      if (o.n.metaCounts) {
+        extra = "<br><b>" + metaState.col + ":</b> " +
+          [...o.n.metaCounts.entries()].map(([cat, cnt]) => `${cat} (${cnt})`).join(", ");
+      }
+      tip.innerHTML = `<b>${o.n.label}</b><br>samples: ${o.n.count}<br>${o.n.members}${extra}` +
         `<div><button data-act="samples">Download samples</button>` +
         `<button data-act="matrix">Download matrix</button></div>`;
       tip.style.display = "block";
       positionTip(ev);
     });
-    c.addEventListener("mousemove", ev => { if (hoverNode === o) positionTip(ev); });
-    c.addEventListener("mouseleave", () => {
+    grp.addEventListener("mousemove", ev => { if (hoverNode === o) positionTip(ev); });
+    grp.addEventListener("mouseleave", () => {
       hideTimer = setTimeout(() => { tip.style.display = "none"; }, 350);
     });
   }
@@ -487,7 +638,7 @@ function redraw() {
     o.label.setAttribute("y", (a.y + b.y) / 2);
   });
   nodeObjs.forEach(o => {
-    o.c.setAttribute("cx", o.n.x); o.c.setAttribute("cy", o.n.y);
+    o.grp.setAttribute("transform", `translate(${o.n.x},${o.n.y})`);
     o.t.setAttribute("x", o.n.x); o.t.setAttribute("y", o.n.y);
   });
 }
@@ -534,7 +685,7 @@ svg.addEventListener("wheel", ev => {
   ev.preventDefault();
   const p = clientToViewBox(ev);
   const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
-  const nk = Math.max(0.2, Math.min(25, k * factor));
+  const nk = Math.max(0.01, Math.min(25, k * factor));
   tx = p.x - (p.x - tx) * (nk / k);
   ty = p.y - (p.y - ty) * (nk / k);
   k = nk;
@@ -562,7 +713,7 @@ window.addEventListener("pointermove", ev => {
 });
 
 window.addEventListener("pointerup", () => {
-  if (drag) { drag.n.pinned = false; drag.c.style.cursor = "grab"; drag = null; }
+  if (drag) { drag.n.pinned = false; drag.grp.style.cursor = "grab"; drag = null; }
   panning = false;
 });
 
@@ -783,17 +934,52 @@ function exportPDF() {
     ops.push(`BT /F1 ${state.edgeFont.toFixed(2)} Tf ${tx.toFixed(2)} ${((y1 + y2) / 2).toFixed(2)} Td (${esc(s)}) Tj ET`);
   }
   const bez = 0.5522847498;
-  for (const n of nodes) {
-    const cx = px(n.x), cy = py(n.y), r = n.r * k * s;
-    setFill(rgb(n.color));
-    setStroke([0, 0, 0]);
-    ops.push("0.800 w");
+  // Append the four bezier curves tracing a full circle (current path must be open).
+  const circleCurves = (cx, cy, r) => {
     ops.push(`${(cx + r).toFixed(2)} ${cy.toFixed(2)} m`);
     ops.push(`${(cx + r).toFixed(2)} ${(cy + bez * r).toFixed(2)} ${(cx + bez * r).toFixed(2)} ${(cy + r).toFixed(2)} ${cx.toFixed(2)} ${(cy + r).toFixed(2)} c`);
     ops.push(`${(cx - bez * r).toFixed(2)} ${(cy + r).toFixed(2)} ${(cx - r).toFixed(2)} ${(cy + bez * r).toFixed(2)} ${(cx - r).toFixed(2)} ${cy.toFixed(2)} c`);
     ops.push(`${(cx - r).toFixed(2)} ${(cy - bez * r).toFixed(2)} ${(cx - bez * r).toFixed(2)} ${(cy - r).toFixed(2)} ${cx.toFixed(2)} ${(cy - r).toFixed(2)} c`);
     ops.push(`${(cx + bez * r).toFixed(2)} ${(cy - r).toFixed(2)} ${(cx + r).toFixed(2)} ${(cy - bez * r).toFixed(2)} ${(cx + r).toFixed(2)} ${cy.toFixed(2)} c`);
-    ops.push("B");
+  };
+  // Append a filled pie sector of radius r from graph angle a0 to a1 (y-down),
+  // drawn with bezier arc segments of at most 90 degrees each.
+  const wedgeFill = (cx, cy, r, a0, a1, color) => {
+    setFill(color);
+    // Graph angle a -> PDF point (cx + r cos a, cy - r sin a); with t = -a this
+    // becomes a standard counter-clockwise arc from t = -a1 to t = -a0.
+    let t = -a1;
+    const tEnd = -a0;
+    ops.push(`${cx.toFixed(2)} ${cy.toFixed(2)} m`);
+    ops.push(`${(cx + r * Math.cos(t)).toFixed(2)} ${(cy + r * Math.sin(t)).toFixed(2)} l`);
+    while (t < tEnd - 1e-9) {
+      const d = Math.min(Math.PI / 2, tEnd - t);
+      const kk = 4 / 3 * Math.tan(d / 4);
+      const t1 = t + d;
+      const x3 = cx + r * Math.cos(t1), y3 = cy + r * Math.sin(t1);
+      ops.push(`${(cx + r * Math.cos(t) - kk * r * Math.sin(t)).toFixed(2)} ${(cy + r * Math.sin(t) + kk * r * Math.cos(t)).toFixed(2)} ${(x3 + kk * r * Math.sin(t1)).toFixed(2)} ${(y3 - kk * r * Math.cos(t1)).toFixed(2)} ${x3.toFixed(2)} ${y3.toFixed(2)} c`);
+      t = t1;
+    }
+    ops.push("h f");
+  };
+  for (const n of nodes) {
+    const cx = px(n.x), cy = py(n.y), r = n.r * k * s;
+    setStroke([0, 0, 0]);
+    ops.push("0.800 w");
+    if (n.pie && n.pie.length > 1) {
+      let a0 = -Math.PI / 2;
+      for (const sl of n.pie) {
+        const a1 = a0 + sl.frac * 2 * Math.PI;
+        wedgeFill(cx, cy, r, a0, a1 - 1e-9, rgb(sl.color));
+        a0 = a1;
+      }
+      circleCurves(cx, cy, r);
+      ops.push("S");
+    } else {
+      setFill(rgb(n.color));
+      circleCurves(cx, cy, r);
+      ops.push("B");
+    }
     const size = Math.max(7, Math.min(16, r * 0.5));
     setFill([0, 0, 0]);
     const tx = cx - 0.5 * size * n.label.length;
@@ -842,8 +1028,8 @@ document.getElementById("export").onclick = () => {
   else exportSVG();
 };
 
-document.getElementById("zin").onclick = () => { k *= 1.2; applyTransform(); };
-document.getElementById("zout").onclick = () => { k /= 1.2; applyTransform(); };
+document.getElementById("zin").onclick = () => { k = Math.min(25, k * 1.2); applyTransform(); };
+document.getElementById("zout").onclick = () => { k = Math.max(0.01, k / 1.2); applyTransform(); };
 document.getElementById("fit").onclick = () => {
   const xs = nodes.map(n => n.x);
   const ys = nodes.map(n => n.y);
@@ -911,9 +1097,98 @@ function rebuild() {
   playButton.classList.remove("active");
   buildGraph();
   computeSnpMean();
+  buildLegend();
   k = 1; tx = 0; ty = 0;
   applyTransform();
 }
+
+// ---- legend ----
+const legendEl = document.getElementById("legend");
+const legendItems = document.getElementById("legendItems");
+const legendToggleBtn = document.getElementById("legendToggle");
+
+function buildLegend() {
+  if (!metaState.col || META.bySample.size === 0) {
+    legendEl.style.display = "none";
+    legendToggleBtn.style.display = "none";
+    return;
+  }
+  legendToggleBtn.style.display = "";
+  // Total sample counts per category across the whole dataset.
+  const totals = new Map();
+  for (let i = 0; i < N; i++) {
+    const rec = META.bySample.get(LABELS[i]);
+    const v = (rec && rec[metaState.col] !== "" && rec[metaState.col] != null) ? rec[metaState.col] : "(no data)";
+    totals.set(v, (totals.get(v) || 0) + 1);
+  }
+  const rows = [...totals.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  legendItems.innerHTML = "";
+  const title = document.createElement("div");
+  title.style.fontWeight = "bold";
+  title.textContent = metaState.col;
+  legendItems.appendChild(title);
+  for (const [cat, cnt] of rows) {
+    const color = cat === "(no data)" ? NA_COLOR : catColors.get(cat);
+    const row = document.createElement("div");
+    row.innerHTML = `<span class="swatch" style="background:${color}"></span><span>${cat}</span><span class="count">(${cnt})</span>`;
+    legendItems.appendChild(row);
+  }
+  if (metaState.mode === "mixed") {
+    const row = document.createElement("div");
+    row.innerHTML = `<span class="swatch" style="background:${metaState.mixedColor}"></span><span>(mixed)</span>`;
+    legendItems.appendChild(row);
+  }
+  legendEl.style.display = "block";
+}
+
+legendToggleBtn.onclick = () => {
+  legendEl.style.display = legendEl.style.display === "none" ? "block" : "none";
+};
+document.getElementById("legendHeader").onclick = () => { legendEl.style.display = "none"; };
+
+// ---- metadata controls ----
+const metaColSelect = document.getElementById("metaCol");
+const metaModeSelect = document.getElementById("metaMode");
+const mixedColorInput = document.getElementById("mixedColor");
+
+function refreshMetaColors() {
+  computeCategoryColors();
+  computeNodeColors();
+  buildLegend();
+  if (nodes.length) render();
+}
+
+document.getElementById("metaFile").onchange = ev => {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = parseMetadata(String(reader.result));
+      META.columns = parsed.columns;
+      META.bySample = parsed.bySample;
+      metaColSelect.innerHTML = "";
+      for (const col of META.columns) {
+        const opt = document.createElement("option");
+        opt.value = col; opt.textContent = col;
+        metaColSelect.appendChild(opt);
+      }
+      metaState.col = META.columns[0];
+      metaColSelect.value = metaState.col;
+      refreshMetaColors();
+      const matched = LABELS.filter(l => META.bySample.has(l)).length;
+      document.getElementById("hint").textContent =
+        `Loaded metadata for ${META.bySample.size} samples from ${file.name} (${matched} matched the matrix)`;
+    } catch (err) {
+      alert("Could not parse the metadata table: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+};
+
+metaColSelect.onchange = () => { metaState.col = metaColSelect.value; refreshMetaColors(); };
+metaModeSelect.onchange = () => { metaState.mode = metaModeSelect.value; refreshMetaColors(); };
+mixedColorInput.oninput = () => { metaState.mixedColor = mixedColorInput.value; refreshMetaColors(); };
 
 // ---- matrix upload ----
 function parseMatrix(text) {
