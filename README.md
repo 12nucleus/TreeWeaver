@@ -29,9 +29,11 @@ publication-ready figure — all locally, with no server and no data leaving you
 - **Live force simulation** with Play/Pause, plus Repulsion / Attraction / Speed sliders.
 - **Styling controls** — node-label size, edge-label font size, edge thickness.
 - **Export** to **SVG**, **PNG**, **PDF** (vector), or a standalone **HTML** file —
-  matching exactly what you see. The HTML export embeds the metadata table and stays
-  interactive: pan/zoom, hover tooltips, legend, and live re-coloring by any metadata
-  column (pie or mixed mode), plus label/edge font-size controls — ideal for sharing.
+  matching exactly what you see; the metadata legend is included in the image
+  exports too (and respects hiding it on screen). The HTML export also embeds the
+  metadata table and stays interactive: pan/zoom, hover tooltips, legend, and live
+  re-coloring by any metadata column (pie or mixed mode), plus label/edge font-size
+  controls — ideal for sharing.
 - **Per-node downloads** — hover a node to download its sample list and its sub-SNP matrix.
 - **Metadata coloring** — upload a metadata table (TSV/CSV: first column = sample name,
   one column per metadata field) and color nodes by any column. Nodes mixing several

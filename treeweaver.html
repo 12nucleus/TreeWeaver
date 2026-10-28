@@ -862,6 +862,99 @@ document.getElementById("reset").onclick = () => {
 };
 
 // ---- export (SVG / PNG / PDF) ----
+
+// Legend contents for image exports, rebuilt from the same data buildLegend()
+// uses (totals per category, NA color for missing values, mixed-mode row).
+// Returns null when no legend would be shown on screen.
+function legendData() {
+  if (!metaState.col || META.bySample.size === 0) return null;
+  const totals = new Map();
+  for (let i = 0; i < N; i++) {
+    const rec = META.bySample.get(LABELS[i]);
+    const v = (rec && rec[metaState.col] !== "" && rec[metaState.col] != null) ? rec[metaState.col] : "(no data)";
+    totals.set(v, (totals.get(v) || 0) + 1);
+  }
+  const rows = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .map(([cat, cnt]) => ({
+      color: cat === "(no data)" ? NA_COLOR : catColors.get(cat),
+      label: cat + " (" + cnt + ")",
+    }));
+  if (metaState.mode === "mixed") rows.push({ color: metaState.mixedColor, label: "(mixed)" });
+  return { title: metaState.col, rows };
+}
+
+// Shared legend layout in generic font-size units: a white rounded card at
+// the top-right with a bold title and one swatch+label row per category.
+function legendMetrics(ld) {
+  const font = 13;
+  let wText = ld.title.length * font * 0.62;
+  for (const r of ld.rows) wText = Math.max(wText, r.label.length * font * 0.62);
+  return { font, rowH: 18, w: 12 + 18 + wText + 8, h: 12 + 16 + ld.rows.length * 18 };
+}
+
+// Extend the exported SVG's canvas to the full image size. The live SVG's
+// viewBox is a 1000x1000 square that gets letterboxed inside the on-screen
+// canvas (width/height = the window size), so the legend must be drawn at the
+// image's right edge, not the tree square's. The extended viewBox maps the
+// tree to exactly the same pixels as before (centered “meet”). Returns the
+// px-per-viewBox-unit scale, or null when no legend is shown (then the
+// export stays byte-identical to before).
+function prepareExportCanvas(el) {
+  if (legendEl.style.display === "none") return null;
+  if (!legendData()) return null;
+  const w = parseFloat(el.getAttribute("width")) || W;
+  const h = parseFloat(el.getAttribute("height")) || H;
+  const scale = Math.min(w / W, h / H) || 1;
+  const vw = w / scale, vh = h / scale;
+  el.setAttribute("viewBox", `${(-(vw - W) / 2).toFixed(2)} ${(-(vh - H) / 2).toFixed(2)} ${vw.toFixed(2)} ${vh.toFixed(2)}`);
+  el.setAttribute("preserveAspectRatio", "none");
+  return scale;
+}
+
+// Append the legend to an exported SVG clone (used by both SVG and PNG
+// exports). Respects the on-screen visibility toggle; the HTML export draws
+// its own interactive legend, so it does not call this. `scale` is the
+// px-per-viewBox-unit factor from prepareExportCanvas.
+function addExportLegend(el, scale) {
+  if (!scale) return;
+  const ld = legendData();
+  if (!ld) return;
+  const m = legendMetrics(ld);
+  const w = parseFloat(el.getAttribute("width")) || W;
+  const pad = 16 / scale;
+  const gx = (w / scale) / 2 + W / 2 - m.w - pad;   // right edge of the canvas
+  const gy = 16 / scale;
+  const g = document.createElementNS(NS, "g");
+  const bg = document.createElementNS(NS, "rect");
+  bg.setAttribute("x", gx); bg.setAttribute("y", gy);
+  bg.setAttribute("width", m.w); bg.setAttribute("height", m.h);
+  bg.setAttribute("rx", 6);
+  bg.setAttribute("fill", "rgba(255,255,255,0.95)");
+  bg.setAttribute("stroke", "#bbbbbb");
+  g.appendChild(bg);
+  const title = document.createElementNS(NS, "text");
+  title.setAttribute("x", gx + 12); title.setAttribute("y", gy + 12 + 11);
+  title.setAttribute("font-size", m.font); title.setAttribute("font-weight", "bold");
+  title.setAttribute("fill", "#222222");
+  title.textContent = ld.title;
+  g.appendChild(title);
+  ld.rows.forEach((r, i) => {
+    const cy = gy + 12 + 16 + 3 + i * m.rowH;
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", gx + 12 + 6); c.setAttribute("cy", cy);
+    c.setAttribute("r", 5.5); c.setAttribute("fill", r.color);
+    c.setAttribute("stroke", "#555555");
+    g.appendChild(c);
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("x", gx + 12 + 18); t.setAttribute("y", cy + 4);
+    t.setAttribute("font-size", 12); t.setAttribute("fill", "#333333");
+    t.textContent = r.label;
+    g.appendChild(t);
+  });
+  el.appendChild(g);
+}
+
 function downloadBlob(blob, name) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -887,12 +980,16 @@ function cloneView() {
 }
 
 function exportSVG() {
-  downloadBlob(new Blob([cloneView().outerHTML], { type: "image/svg+xml" }), PREFIX + ".svg");
+  const clone = cloneView();
+  addExportLegend(clone, prepareExportCanvas(clone));
+  downloadBlob(new Blob([clone.outerHTML], { type: "image/svg+xml" }), PREFIX + ".svg");
 }
 
 function exportPNG() {
   const size = viewSize();
-  const data = new XMLSerializer().serializeToString(cloneView());
+  const clone = cloneView();
+  addExportLegend(clone, prepareExportCanvas(clone));
+  const data = new XMLSerializer().serializeToString(clone);
   const url = URL.createObjectURL(new Blob([data], { type: "image/svg+xml;charset=utf-8" }));
   const img = new Image();
   img.onload = () => {
@@ -990,6 +1087,32 @@ function exportPDF() {
     setFill([0, 0, 0]);
     const tx = cx - 0.5 * size * n.label.length;
     ops.push(`BT /F1 ${size.toFixed(2)} Tf ${tx.toFixed(2)} ${cy.toFixed(2)} Td (${esc(n.label)}) Tj ET`);
+  }
+  // Legend card (matches the on-screen overlay) at the top-right of the page.
+  if (legendEl.style.display !== "none") {
+    const ld = legendData();
+    if (ld) {
+      const m = legendMetrics(ld);
+      const lx = pageW - m.w * s - 16;
+      const top = pageH - 16;                       // top edge in user space
+      setFill([1, 1, 1]);
+      ops.push(`${lx.toFixed(2)} ${(top - m.h * s).toFixed(2)} ${(m.w * s).toFixed(2)} ${(m.h * s).toFixed(2)} re f`);
+      setStroke([0.73, 0.73, 0.73]);
+      ops.push("0.800 w");
+      ops.push(`${lx.toFixed(2)} ${(top - m.h * s).toFixed(2)} ${(m.w * s).toFixed(2)} ${(m.h * s).toFixed(2)} re S`);
+      setFill([0.13, 0.13, 0.13]);
+      ops.push(`BT /F1 14 Tf ${(lx + 12 * s).toFixed(2)} ${(top - 23 * s).toFixed(2)} Td (${esc(ld.title)}) Tj ET`);
+      ld.rows.forEach((r, i) => {
+        const cy = top - (31 + i * m.rowH) * s;     // swatch centre (user space)
+        setFill(rgb(r.color));
+        setStroke([0.33, 0.33, 0.33]);
+        ops.push("0.600 w");
+        circleCurves(lx + 18 * s, cy, 5.5 * s);
+        ops.push("B");
+        setFill([0.2, 0.2, 0.2]);
+        ops.push(`BT /F1 12 Tf ${(lx + 30 * s).toFixed(2)} ${(cy - 4 * s).toFixed(2)} Td (${esc(r.label)}) Tj ET`);
+      });
+    }
   }
   const content = ops.join("\n");
   const enc = new TextEncoder();
